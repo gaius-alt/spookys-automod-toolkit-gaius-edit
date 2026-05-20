@@ -656,14 +656,38 @@ public class SetupService
     {
         try
         {
-            var result = RunProcess("dotnet", "--version");
-            if (result.exitCode == 0)
+            // Use --list-sdks (not --version) so we see every installed SDK.
+            // --version returns only the global.json / highest SDK, which makes
+            // the wizard report ".NET 8 not found" when a user has 9.x or 10.x
+            // installed alongside 8.x.
+            var result = RunProcess("dotnet", "--list-sdks");
+            if (result.exitCode != 0)
             {
-                var version = result.output.Trim();
-                var isNet8 = version.StartsWith("8.");
-                return (isNet8, version);
+                return (false, "Not found");
             }
-            return (false, "Not found");
+
+            // Each line looks like: "8.0.420 [C:\Program Files\dotnet\sdk]"
+            var sdkVersions = result.output
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => line.Trim().Split(' ')[0])
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .ToList();
+
+            if (sdkVersions.Count == 0)
+            {
+                return (false, "Not found");
+            }
+
+            var net8 = sdkVersions.FirstOrDefault(v => v.StartsWith("8."));
+            if (net8 != null)
+            {
+                // Report the .NET 8 version we'll actually use, even if newer SDKs exist
+                return (true, net8);
+            }
+
+            // No .NET 8 found — surface the highest installed SDK so the user
+            // understands what they have and what's missing.
+            return (false, sdkVersions[^1]);
         }
         catch
         {

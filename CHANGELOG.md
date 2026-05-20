@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.2] - 2026-05-20
+
+### Fixed
+
+- **Setup Wizard .NET 8 detection** — The wizard now correctly detects .NET 8 even when newer SDKs (9.x, 10.x) are also installed. Previously it used `dotnet --version` which only reports the highest/global SDK, causing the wizard to falsely claim ".NET 8 not found" for anyone with .NET 9 or 10 installed alongside 8. Now uses `dotnet --list-sdks` and checks for any 8.x entry. Reported by **Zol** and **knight24_**.
+
 ## [1.11.1] - 2026-04-07
 
 ### Fixed
