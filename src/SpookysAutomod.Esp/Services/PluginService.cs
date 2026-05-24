@@ -1,5 +1,6 @@
 using Mutagen.Bethesda;
 using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Plugins.Cache;
 using Mutagen.Bethesda.Plugins.Records;
 using Mutagen.Bethesda.Skyrim;
 using Noggog;
@@ -461,13 +462,63 @@ public class PluginService
                     break;
 
                 case "travel":
-                    if (options?.ContainsKey("destination") == true)
+                    // New: alias-target Travel package. Resolves to whatever
+                    // REFR fills the named alias at runtime. The package's
+                    // OwnerQuest is set automatically so the engine can
+                    // resolve the alias index.
+                    if (options?.ContainsKey("targetAliasQuest") == true
+                        && options.ContainsKey("targetAliasName"))
                     {
-                        var destStr = options["destination"].ToString();
+                        var questEd = options["targetAliasQuest"].ToString()!;
+                        var aliasName = options["targetAliasName"].ToString()!;
+                        var quest = mod.Quests.FirstOrDefault(q => q.EditorID == questEd);
+                        if (quest == null)
+                        {
+                            return Result<string>.Fail(
+                                $"Quest not found: {questEd}",
+                                suggestions: new List<string>
+                                {
+                                    "Create the quest first with 'esp add-quest'",
+                                    "Check the quest editor ID spelling"
+                                });
+                        }
+                        var alias = quest.Aliases.FirstOrDefault(a => a.Name == aliasName);
+                        if (alias == null)
+                        {
+                            return Result<string>.Fail(
+                                $"Alias '{aliasName}' not found in quest '{questEd}'",
+                                suggestions: new List<string>
+                                {
+                                    "Create the alias first with 'esp add-alias'",
+                                    "Check the alias name spelling"
+                                });
+                        }
+                        builder.AsTravelToAlias((int)alias.ID).WithOwnerQuest(quest.FormKey);
+                    }
+                    // Legacy: hardcoded-REFR target Travel package. The CLI
+                    // option `--destination` maps to options["destinationRef"]
+                    // (the shared key used by accompany packages too), not
+                    // options["destination"]. Accept both for backward compat.
+                    else if (options?.ContainsKey("destinationRef") == true ||
+                             options?.ContainsKey("destination") == true)
+                    {
+                        var destStr = (options.ContainsKey("destinationRef")
+                                       ? options["destinationRef"]
+                                       : options["destination"])?.ToString();
                         if (!string.IsNullOrEmpty(destStr) && FormKey.TryFactory(destStr, out var destFormKey))
                         {
                             builder.AsTravel(destFormKey);
                         }
+                    }
+                    else
+                    {
+                        return Result<string>.Fail(
+                            "Travel packages require either --destination (FormKey of REFR) or --target-alias-quest + --target-alias-name (quest alias)",
+                            suggestions: new List<string>
+                            {
+                                "For static destinations: pass --destination <FormKey>",
+                                "For dynamic destinations: pass --target-alias-quest <questEditorId> --target-alias-name <aliasName>"
+                            });
                     }
                     break;
 
@@ -516,14 +567,67 @@ public class PluginService
                     break;
 
                 case "follow":
-                    var followDistance = Convert.ToUInt16(options?.GetValueOrDefault("followDistance", 200) ?? 200);
+                {
+                    // Shared Follow parameters. Slot/field names extracted from
+                    // Skyrim.esm:0x00019B2C ("Follow" vanilla template) via the
+                    // inspect_pack tool. Defaults mirror the template's defaults:
+                    //   MinRadius=128, MaxRadius=256, Accompany=true,
+                    //   NeedLOS=false, RideHorse=false.
+                    // Backward-compat: legacy callers using `followDistance` get
+                    // that value mapped onto MaxRadius (the closest single-value
+                    // parameter to what the old code intended).
+                    var legacyDistance = options?.GetValueOrDefault("followDistance");
+                    var minRadius        = Convert.ToSingle(options?.GetValueOrDefault("minRadius", 128.0f) ?? 128.0f);
+                    var maxRadius        = legacyDistance != null
+                        ? Convert.ToSingle(legacyDistance)
+                        : Convert.ToSingle(options?.GetValueOrDefault("maxRadius", 256.0f) ?? 256.0f);
+                    var goToLeadersGoal  = Convert.ToBoolean(options?.GetValueOrDefault("goToLeadersGoal", true) ?? true);
+                    var needLOS          = Convert.ToBoolean(options?.GetValueOrDefault("needLOS", false) ?? false);
+                    var rideHorse        = Convert.ToBoolean(options?.GetValueOrDefault("rideHorse", false) ?? false);
 
-                    if (options?.ContainsKey("targetRef") == true)
+                    // New: alias-target Follow package. The leader is resolved
+                    // at runtime to whatever REFR fills the named alias on the
+                    // owning quest. Matches the M5.6 framework's leader-slot
+                    // architecture.
+                    if (options?.ContainsKey("targetAliasQuest") == true
+                        && options.ContainsKey("targetAliasName"))
+                    {
+                        var questEd = options["targetAliasQuest"].ToString()!;
+                        var aliasName = options["targetAliasName"].ToString()!;
+                        var quest = mod.Quests.FirstOrDefault(q => q.EditorID == questEd);
+                        if (quest == null)
+                        {
+                            return Result<string>.Fail(
+                                $"Quest not found: {questEd}",
+                                suggestions: new List<string>
+                                {
+                                    "Create the quest first with 'esp add-quest'",
+                                    "Check the quest editor ID spelling"
+                                });
+                        }
+                        var alias = quest.Aliases.FirstOrDefault(a => a.Name == aliasName);
+                        if (alias == null)
+                        {
+                            return Result<string>.Fail(
+                                $"Alias '{aliasName}' not found in quest '{questEd}'",
+                                suggestions: new List<string>
+                                {
+                                    "Create the alias first with 'esp add-alias'",
+                                    "Check the alias name spelling"
+                                });
+                        }
+                        builder.AsFollowToAlias((int)alias.ID, minRadius, maxRadius,
+                                                goToLeadersGoal, needLOS, rideHorse)
+                               .WithOwnerQuest(quest.FormKey);
+                    }
+                    // Legacy: static-REFR target Follow.
+                    else if (options?.ContainsKey("targetRef") == true)
                     {
                         var targetRefStr = options["targetRef"]?.ToString();
                         if (!string.IsNullOrEmpty(targetRefStr) && FormKey.TryFactory(targetRefStr, out var targetFormKey))
                         {
-                            builder.AsFollow(targetFormKey, followDistance);
+                            builder.AsFollow(targetFormKey, minRadius, maxRadius,
+                                             goToLeadersGoal, needLOS, rideHorse);
                         }
                         else
                         {
@@ -532,9 +636,11 @@ public class PluginService
                     }
                     else
                     {
-                        return Result<string>.Fail("Follow packages require a valid target reference (targetRef)");
+                        return Result<string>.Fail(
+                            "Follow packages require either --target-ref (FormKey of an actor) or --target-alias-quest + --target-alias-name (quest alias holding the leader)");
                     }
                     break;
+                }
 
                 case "guard":
                     if (options?.ContainsKey("markerRef") == true)
@@ -1185,6 +1291,84 @@ public class PluginService
     /// <summary>
     /// Attach an existing package to an NPC.
     /// </summary>
+    /// <summary>
+    /// Attach a package to a quest's reference alias. The package will run
+    /// for whichever actor fills the alias at runtime. This is the canonical
+    /// pattern for dynamic-target Travel packages (alias-target packages
+    /// applied to alias-attached actors).
+    /// </summary>
+    public Result<string> AttachPackageToAlias(
+        string pluginPath,
+        string questEditorId,
+        string aliasName,
+        string packageEditorId)
+    {
+        try
+        {
+            if (!File.Exists(pluginPath))
+            {
+                return Result<string>.Fail($"Plugin not found: {pluginPath}");
+            }
+
+            var mod = SkyrimMod.CreateFromBinary(
+                pluginPath,
+                SkyrimRelease.SkyrimSE,
+                new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryReadParameters());
+
+            if (mod.ModHeader.Stats.NextFormID < 0x800)
+            {
+                mod.ModHeader.Stats.NextFormID = 0x800;
+            }
+
+            var quest = mod.Quests.FirstOrDefault(q => q.EditorID == questEditorId);
+            if (quest == null)
+            {
+                return Result<string>.Fail(
+                    $"Quest not found: {questEditorId}",
+                    suggestions: new List<string>
+                    {
+                        "Create the quest first with 'esp add-quest'",
+                        "Check the quest editor ID spelling"
+                    });
+            }
+
+            var alias = quest.Aliases.FirstOrDefault(a => a.Name == aliasName);
+            if (alias == null)
+            {
+                return Result<string>.Fail(
+                    $"Alias '{aliasName}' not found in quest '{questEditorId}'",
+                    suggestions: new List<string>
+                    {
+                        "Create the alias first with 'esp add-alias'",
+                        "Check the alias name spelling"
+                    });
+            }
+
+            var package = mod.Packages.FirstOrDefault(p => p.EditorID == packageEditorId);
+            if (package == null)
+            {
+                return Result<string>.Fail(
+                    $"Package not found: {packageEditorId}",
+                    suggestions: new List<string>
+                    {
+                        "Create the package first with 'esp add-package'",
+                        "Check the package editor ID spelling"
+                    });
+            }
+
+            alias.PackageData.Add(package.ToLink());
+
+            mod.WriteToBinary(pluginPath);
+
+            _logger.Info($"Attached package '{packageEditorId}' to alias '{aliasName}' in quest '{questEditorId}'");
+            return Result<string>.Ok($"Package attached to alias");
+        }
+        catch (Exception ex)
+        {
+            return Result<string>.Fail($"Failed to attach package to alias: {ex.Message}", ex.StackTrace);
+        }
+    }
+
     public Result<string> AttachPackageToNpc(
         string pluginPath,
         string npcEditorId,
@@ -3016,5 +3200,162 @@ public class PluginService
         quest.VirtualMachineAdapter = adapter;
 
         return Result<ScriptEntry>.Ok(script);
+    }
+
+    /// <summary>
+    /// Place a PlacedObject (REFR) into a target Cell in the plugin.
+    ///
+    /// The target Cell can be:
+    ///   - A cell defined in the plugin itself (rare for esps adding new
+    ///     content; the cell would have been added via a separate command
+    ///     that doesn't exist yet).
+    ///   - A cell defined in one of the plugin's masters. In that case we
+    ///     resolve via a link cache built from the data folder, override
+    ///     the cell into the target plugin, and add the REFR to the
+    ///     override's Persistent/Temporary collection.
+    ///
+    /// Skyrim.esm needs to be in the data folder for the override path.
+    /// </summary>
+    public Result<string> AddRefr(
+        string pluginPath,
+        string baseFormKey,
+        string cellFormKey,
+        float x, float y, float z,
+        float rotX = 0f, float rotY = 0f, float rotZ = 0f,
+        string? editorId = null,
+        bool persistent = true,
+        float? scale = null,
+        string? dataFolder = null)
+    {
+        try
+        {
+            if (!File.Exists(pluginPath))
+            {
+                return Result<string>.Fail($"Plugin not found: {pluginPath}");
+            }
+
+            if (!FormKey.TryFactory(baseFormKey, out var baseFk))
+            {
+                return Result<string>.Fail(
+                    $"Invalid --base FormKey: {baseFormKey}",
+                    suggestions: new List<string>
+                    {
+                        "Format: XXXXXX:PluginName.esp (6 hex digits, plugin filename)",
+                        "Example: 000033:Skyrim.esm (vanilla XMarker base)"
+                    });
+            }
+
+            if (!FormKey.TryFactory(cellFormKey, out var cellFk))
+            {
+                return Result<string>.Fail(
+                    $"Invalid --cell FormKey: {cellFormKey}",
+                    suggestions: new List<string>
+                    {
+                        "Format: XXXXXX:PluginName.esp (6 hex digits, plugin filename)",
+                        "The cell must exist in the plugin itself or in one of its masters"
+                    });
+            }
+
+            var mod = SkyrimMod.CreateFromBinary(
+                pluginPath,
+                SkyrimRelease.SkyrimSE);
+            if (mod.ModHeader.Stats.NextFormID < 0x800)
+            {
+                mod.ModHeader.Stats.NextFormID = 0x800;
+            }
+
+            // Find the target cell. Two paths: in-plugin or via masters.
+            ICell? targetCell = null;
+
+            // Path 1: cell already exists in the plugin (e.g. previous add-refr
+            // call already overrode it - reuse the override).
+            foreach (var block in mod.Cells)
+            {
+                foreach (var subBlock in block.SubBlocks)
+                {
+                    foreach (var c in subBlock.Cells)
+                    {
+                        if (c.FormKey == cellFk)
+                        {
+                            targetCell = c;
+                            break;
+                        }
+                    }
+                    if (targetCell != null) break;
+                }
+                if (targetCell != null) break;
+            }
+
+            // Path 2: cell comes from a master. Need a link cache + override.
+            if (targetCell == null)
+            {
+                if (string.IsNullOrEmpty(dataFolder))
+                {
+                    return Result<string>.Fail(
+                        $"Cell {cellFormKey} not found in plugin; need --data-folder to resolve from masters",
+                        suggestions: new List<string>
+                        {
+                            "Pass --data-folder pointing at the Skyrim Data directory so the cell can be resolved from a master ESM/ESP",
+                            "Example: --data-folder 'C:/Skyrim Special Edition/Data'"
+                        });
+                }
+
+                var linkCacheResult = new LinkCacheManager(_logger).CreateLinkCacheWithMod(dataFolder, mod);
+                if (!linkCacheResult.Success)
+                {
+                    return Result<string>.Fail(
+                        $"Failed to build link cache: {linkCacheResult.Error}",
+                        linkCacheResult.ErrorContext,
+                        linkCacheResult.Suggestions);
+                }
+                var linkCache = (ILinkCache<ISkyrimMod, ISkyrimModGetter>)linkCacheResult.Value!;
+
+                var cellLink = cellFk.ToLink<ICellGetter>();
+                if (!cellLink.TryResolveContext<ISkyrimMod, ISkyrimModGetter, ICell, ICellGetter>(linkCache, out var cellContext))
+                {
+                    return Result<string>.Fail(
+                        $"Cell {cellFormKey} not found in plugin or any master",
+                        suggestions: new List<string>
+                        {
+                            "Verify the FormKey is correct (format XXXXXX:Plugin.esp)",
+                            "Verify the master containing the cell is in --data-folder",
+                            "If the master is the plugin itself, the cell must already exist (use a different command to create it)"
+                        });
+                }
+
+                // Override the master cell into our mod so we can write to it.
+                targetCell = cellContext.GetOrAddAsOverride(mod);
+            }
+
+            // Build and place the REFR.
+            var builder = new RefrBuilder(mod, targetCell, editorId)
+                .WithBase(baseFk)
+                .AtPosition(x, y, z)
+                .WithRotation(rotX, rotY, rotZ);
+            if (scale.HasValue) builder.WithScale(scale.Value);
+            if (!persistent) builder.AsTemporary();
+
+            var refr = builder.Build();
+
+            mod.WriteToBinary(pluginPath);
+
+            _logger.Info(
+                $"Added REFR {refr.EditorID ?? "(no editor ID)"} = {refr.FormKey} " +
+                $"base={baseFormKey} cell={cellFormKey} pos=({x:F1},{y:F1},{z:F1})");
+
+            return Result<string>.Ok(refr.FormKey.ToString());
+        }
+        catch (Exception ex)
+        {
+            return Result<string>.Fail(
+                "Failed to add REFR",
+                ex.Message,
+                new List<string>
+                {
+                    "Verify the plugin file is writable and not in use by another process",
+                    "Verify --base FormKey points at a placeable object (Static, Activator, Furniture, etc.)",
+                    "If using a cell from a master, verify --data-folder is correct"
+                });
+        }
     }
 }

@@ -59,6 +59,7 @@ public static class EspCommands
         espCommand.AddCommand(CreateAddConditionCommand());
         espCommand.AddCommand(CreateAddPackageCommand());
         espCommand.AddCommand(CreateAttachPackageCommand());
+        espCommand.AddCommand(CreateAddRefrCommand());
         espCommand.AddCommand(CreateRemoveRecordCommand());
         espCommand.AddCommand(CreateCloneRecordCommand());
 
@@ -3491,6 +3492,34 @@ public static class EspCommands
         var locationRefOption = new Option<string?>(
             "--location-ref",
             description: "FormKey of location (for say packages)");
+        // Alias-target options for Travel and Follow packages. When both are
+        // set, the package's target is the named alias rather than a fixed
+        // REFR. The package's OwnerQuest is set automatically.
+        var targetAliasQuestOption = new Option<string?>(
+            "--target-alias-quest",
+            description: "Editor ID of the quest containing the target alias (use with --target-alias-name for alias-targeted Travel or Follow packages)");
+        var targetAliasNameOption = new Option<string?>(
+            "--target-alias-name",
+            description: "Name of the alias to target (use with --target-alias-quest for alias-targeted Travel or Follow packages)");
+        // Follow procedure parameters. Match slot layout extracted from
+        // Skyrim.esm:0x00019B2C ("Follow" vanilla template). Defaults mirror
+        // the template's defaults so omitting all of these yields a package
+        // that runs identically to the vanilla Follow template.
+        var minRadiusOption = new Option<float?>(
+            "--min-radius",
+            description: "Follow: closest distance follower maintains (default: 128)");
+        var maxRadiusOption = new Option<float?>(
+            "--max-radius",
+            description: "Follow: furthest distance before follower runs (default: 256)");
+        var goToLeadersGoalOption = new Option<bool?>(
+            "--go-to-leaders-goal",
+            description: "Follow: walks WITH leader (caravan-style) rather than behind (default: true)");
+        var needLosOption = new Option<bool?>(
+            "--need-los",
+            description: "Follow: requires line-of-sight to target to follow (default: false)");
+        var rideHorseOption = new Option<bool?>(
+            "--ride-horse",
+            description: "Follow: mount a horse when possible (default: false)");
 
         var cmd = new Command("add-package", "Add an AI package to a plugin")
         {
@@ -3517,7 +3546,14 @@ public static class EspCommands
             topicRefOption,
             shoutRefOption,
             followRefOption,
-            locationRefOption
+            locationRefOption,
+            targetAliasQuestOption,
+            targetAliasNameOption,
+            minRadiusOption,
+            maxRadiusOption,
+            goToLeadersGoalOption,
+            needLosOption,
+            rideHorseOption
         };
 
         cmd.SetHandler((context) =>
@@ -3546,6 +3582,13 @@ public static class EspCommands
             var shoutRef = context.ParseResult.GetValueForOption(shoutRefOption);
             var followRef = context.ParseResult.GetValueForOption(followRefOption);
             var locationRef = context.ParseResult.GetValueForOption(locationRefOption);
+            var targetAliasQuest = context.ParseResult.GetValueForOption(targetAliasQuestOption);
+            var targetAliasName = context.ParseResult.GetValueForOption(targetAliasNameOption);
+            var minRadius = context.ParseResult.GetValueForOption(minRadiusOption);
+            var maxRadius = context.ParseResult.GetValueForOption(maxRadiusOption);
+            var goToLeadersGoal = context.ParseResult.GetValueForOption(goToLeadersGoalOption);
+            var needLos = context.ParseResult.GetValueForOption(needLosOption);
+            var rideHorse = context.ParseResult.GetValueForOption(rideHorseOption);
             var json = context.ParseResult.GetValueForOption(_jsonOption);
             var verbose = context.ParseResult.GetValueForOption(_verboseOption);
 
@@ -3595,6 +3638,23 @@ public static class EspCommands
                 options["followRef"] = followRef;
             if (!string.IsNullOrEmpty(locationRef))
                 options["locationRef"] = locationRef;
+            if (!string.IsNullOrEmpty(targetAliasQuest))
+                options["targetAliasQuest"] = targetAliasQuest;
+            if (!string.IsNullOrEmpty(targetAliasName))
+                options["targetAliasName"] = targetAliasName;
+            // Follow procedure parameters. Only forwarded when the user
+            // explicitly set them; PluginService applies the vanilla-template
+            // defaults (128/256/Accompany=true/etc.) when these are absent.
+            if (minRadius.HasValue)
+                options["minRadius"] = minRadius.Value;
+            if (maxRadius.HasValue)
+                options["maxRadius"] = maxRadius.Value;
+            if (goToLeadersGoal.HasValue)
+                options["goToLeadersGoal"] = goToLeadersGoal.Value;
+            if (needLos.HasValue)
+                options["needLOS"] = needLos.Value;
+            if (rideHorse.HasValue)
+                options["rideHorse"] = rideHorse.Value;
 
             var result = service.AddPackage(plugin, editorId, type, options);
 
@@ -3627,28 +3687,67 @@ public static class EspCommands
     private static Command CreateAttachPackageCommand()
     {
         var pluginArg = new Argument<string>("plugin", "Path to the plugin file");
-        var npcOption = new Option<string>(
+        var npcOption = new Option<string?>(
             aliases: new[] { "--npc", "-n" },
-            description: "Editor ID of the NPC"
-        ) { IsRequired = true };
+            description: "Editor ID of the NPC (use this OR --quest+--alias)");
+        var questOption = new Option<string?>(
+            aliases: new[] { "--quest", "-q" },
+            description: "Editor ID of the quest containing the alias (use with --alias)");
+        var aliasOption = new Option<string?>(
+            aliases: new[] { "--alias", "-a" },
+            description: "Name of the alias to attach the package to (use with --quest)");
         var packageOption = new Option<string>(
             aliases: new[] { "--package", "-p" },
             description: "Editor ID of the package to attach"
         ) { IsRequired = true };
 
-        var cmd = new Command("attach-package", "Attach a package to an NPC")
+        var cmd = new Command("attach-package", "Attach a package to an NPC or to a quest's reference alias")
         {
             pluginArg,
             npcOption,
+            questOption,
+            aliasOption,
             packageOption
         };
 
-        cmd.SetHandler((plugin, npc, package, json, verbose) =>
+        cmd.SetHandler((context) =>
         {
+            var plugin = context.ParseResult.GetValueForArgument(pluginArg);
+            var npc = context.ParseResult.GetValueForOption(npcOption);
+            var quest = context.ParseResult.GetValueForOption(questOption);
+            var alias = context.ParseResult.GetValueForOption(aliasOption);
+            var package = context.ParseResult.GetValueForOption(packageOption)!;
+            var json = context.ParseResult.GetValueForOption(_jsonOption);
+            var verbose = context.ParseResult.GetValueForOption(_verboseOption);
+
             var logger = CreateLogger(json, verbose);
             var service = new PluginService(logger);
 
-            var result = service.AttachPackageToNpc(plugin, npc, package);
+            // Resolve which attachment mode the caller wanted.
+            var npcSet     = !string.IsNullOrEmpty(npc);
+            var questAlias = !string.IsNullOrEmpty(quest) && !string.IsNullOrEmpty(alias);
+            if (!npcSet && !questAlias)
+            {
+                Console.Error.WriteLine("Error: must provide --npc OR (--quest AND --alias)");
+                Environment.ExitCode = 1;
+                return;
+            }
+            if (npcSet && questAlias)
+            {
+                Console.Error.WriteLine("Error: provide only one of --npc OR (--quest AND --alias), not both");
+                Environment.ExitCode = 1;
+                return;
+            }
+
+            SpookysAutomod.Core.Models.Result<string> result;
+            if (questAlias)
+            {
+                result = service.AttachPackageToAlias(plugin, quest!, alias!, package);
+            }
+            else
+            {
+                result = service.AttachPackageToNpc(plugin, npc!, package);
+            }
 
             if (json)
             {
@@ -3656,7 +3755,10 @@ public static class EspCommands
             }
             else if (result.Success)
             {
-                Console.WriteLine($"Package '{package}' attached to NPC '{npc}'");
+                if (questAlias)
+                    Console.WriteLine($"Package '{package}' attached to alias '{alias}' in quest '{quest}'");
+                else
+                    Console.WriteLine($"Package '{package}' attached to NPC '{npc}'");
             }
             else
             {
@@ -3669,9 +3771,9 @@ public static class EspCommands
                         Console.Error.WriteLine($"  - {suggestion}");
                     }
                 }
+                Environment.ExitCode = 1;
             }
-        },
-        pluginArg, npcOption, packageOption, _jsonOption, _verboseOption);
+        });
 
         return cmd;
     }
@@ -3838,6 +3940,142 @@ public static class EspCommands
                 Environment.ExitCode = 1;
             }
         }, pluginArg, sourceArg, newEditorIdArg, dryRunOption, _jsonOption, _verboseOption);
+
+        return cmd;
+    }
+
+    private static Command CreateAddRefrCommand()
+    {
+        var pluginArg = new Argument<string>("plugin", "Path to the plugin file");
+        var baseOption = new Option<string>(
+            aliases: new[] { "--base", "-b" },
+            description: "FormKey of the base form to place (e.g. 000033:Skyrim.esm for XMarker)")
+        { IsRequired = true };
+        var cellOption = new Option<string>(
+            aliases: new[] { "--cell", "-c" },
+            description: "FormKey of the cell to place into (must exist in the plugin or one of its masters)")
+        { IsRequired = true };
+        var xOption = new Option<float>(
+            "--x", () => 0f, "X coordinate");
+        var yOption = new Option<float>(
+            "--y", () => 0f, "Y coordinate");
+        var zOption = new Option<float>(
+            "--z", () => 0f, "Z coordinate");
+        var rotXOption = new Option<float>(
+            "--rot-x", () => 0f, "X rotation (radians)");
+        var rotYOption = new Option<float>(
+            "--rot-y", () => 0f, "Y rotation (radians)");
+        var rotZOption = new Option<float>(
+            "--rot-z", () => 0f, "Z rotation (radians)");
+        var editorIdOption = new Option<string?>(
+            "--editor-id", "Editor ID for the REFR (optional)");
+        var temporaryOption = new Option<bool>(
+            "--temporary",
+            "Place into the cell's Temporary collection instead of Persistent. " +
+            "Temporary REFRs don't survive cell unload + cosave. Default is Persistent.");
+        var scaleOption = new Option<float?>(
+            "--scale", "Uniform scale (optional; vanilla default is 1.0, no XSCL emitted)");
+        var dataFolderOption = new Option<string?>(
+            "--data-folder",
+            "Path to Skyrim Data folder. Required when --cell points at a cell defined " +
+            "in a master file (not in the target plugin itself). Used to build a link " +
+            "cache so the cell can be resolved and overridden into the target plugin.");
+
+        var cmd = new Command(
+            "add-refr",
+            "Place a REFR (PlacedObject) into a cell. The cell must already exist " +
+            "either in the plugin or in one of its master files. Persistent REFRs " +
+            "(default) survive save/load and can be MoveTo'd at runtime by SKSE plugins.")
+        {
+            pluginArg,
+            baseOption, cellOption,
+            xOption, yOption, zOption,
+            rotXOption, rotYOption, rotZOption,
+            editorIdOption, temporaryOption, scaleOption,
+            dataFolderOption,
+        };
+
+        cmd.SetHandler((context) =>
+        {
+            var plugin     = context.ParseResult.GetValueForArgument(pluginArg);
+            var baseFk     = context.ParseResult.GetValueForOption(baseOption)!;
+            var cellFk     = context.ParseResult.GetValueForOption(cellOption)!;
+            var x          = context.ParseResult.GetValueForOption(xOption);
+            var y          = context.ParseResult.GetValueForOption(yOption);
+            var z          = context.ParseResult.GetValueForOption(zOption);
+            var rotX       = context.ParseResult.GetValueForOption(rotXOption);
+            var rotY       = context.ParseResult.GetValueForOption(rotYOption);
+            var rotZ       = context.ParseResult.GetValueForOption(rotZOption);
+            var editorId   = context.ParseResult.GetValueForOption(editorIdOption);
+            var temporary  = context.ParseResult.GetValueForOption(temporaryOption);
+            var scale      = context.ParseResult.GetValueForOption(scaleOption);
+            var dataFolder = context.ParseResult.GetValueForOption(dataFolderOption);
+            var json       = context.ParseResult.GetValueForOption(_jsonOption);
+            var verbose    = context.ParseResult.GetValueForOption(_verboseOption);
+
+            var logger  = CreateLogger(json, verbose);
+            var service = new PluginService(logger);
+
+            var result = service.AddRefr(
+                pluginPath:  plugin,
+                baseFormKey: baseFk,
+                cellFormKey: cellFk,
+                x: x, y: y, z: z,
+                rotX: rotX, rotY: rotY, rotZ: rotZ,
+                editorId: editorId,
+                persistent: !temporary,
+                scale: scale,
+                dataFolder: dataFolder);
+
+            if (json)
+            {
+                if (result.Success)
+                {
+                    Console.WriteLine(new
+                    {
+                        success = true,
+                        result = new
+                        {
+                            formKey    = result.Value,
+                            editorId   = editorId,
+                            baseForm   = baseFk,
+                            cell       = cellFk,
+                            position   = new { x, y, z },
+                            rotation   = new { x = rotX, y = rotY, z = rotZ },
+                            persistent = !temporary,
+                            scale      = scale,
+                        }
+                    }.ToJson());
+                }
+                else
+                {
+                    Console.WriteLine(new
+                    {
+                        success     = false,
+                        error       = result.Error,
+                        suggestions = result.Suggestions,
+                    }.ToJson());
+                    Environment.ExitCode = 1;
+                }
+            }
+            else if (result.Success)
+            {
+                Console.WriteLine($"Placed REFR {result.Value} (editorId={editorId ?? "(none)"}) " +
+                                  $"base={baseFk} cell={cellFk} pos=({x:F1},{y:F1},{z:F1})");
+            }
+            else
+            {
+                Console.Error.WriteLine($"Error: {result.Error}");
+                if (result.Suggestions?.Any() == true)
+                {
+                    foreach (var s in result.Suggestions)
+                    {
+                        Console.Error.WriteLine($"  - {s}");
+                    }
+                }
+                Environment.ExitCode = 1;
+            }
+        });
 
         return cmd;
     }

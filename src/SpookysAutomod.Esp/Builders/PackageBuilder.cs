@@ -26,40 +26,142 @@ public class PackageBuilder
         _package.Flags = Package.Flag.OffersServices;
         _package.InterruptOverride = Package.Interrupt.None;
         _package.PreferredSpeed = Package.Speed.Walk;
+
+        // Mutagen leaves Package.Type at 0 by default, but the engine's PACK
+        // record format only recognizes Type=18 (a regular Package) or Type=19
+        // (a PackageTemplate). Type=0 is treated as malformed and the engine
+        // silently refuses to evaluate the package - no errors, no movement,
+        // just stays on whatever package was already active. Every builder
+        // path through this class produces a regular Package, so set 18.
+        // Discovered 2026-05-20 while debugging M2 travel.
+        _package.Type = Package.Types.Package;
     }
 
     /// <summary>
-    /// Configure package as Sandbox type for general wandering/idling in an area.
+    /// Configure package as Sandbox type for general wandering/idling at the
+    /// actor's current location.
+    ///
+    /// Emits a Type=18 Sandbox package modeled byte-for-byte on vanilla
+    /// `DefaultSandboxCurrentLocation1024` (Skyrim.esm 0x000BFB6B). Slot 0's
+    /// PLDT uses LocationType.NearSelf (the engine's "sandbox where the
+    /// actor stands" anchor) - this works for any actor including the
+    /// player, no per-actor reference plumbing needed. The data input
+    /// values (12 sparse slots) are also lifted from that vanilla package.
+    ///
+    /// Earlier revisions of this method emitted PLDT type=0 (NearReference)
+    /// with a null FormID - a shape no vanilla package uses; the engine
+    /// accepts it silently but produces no visible movement. The 6
+    /// undocumented bits 10-15 in InterruptFlags (mask 0xFC00) are also
+    /// required; without them sandboxing NPCs visibly "stay put" because
+    /// the engine treats partial flag sets as "don't initiate interrupts."
+    /// See https://en.uesp.net/wiki/Skyrim_Mod:Mod_File_Format/PACK
+    /// for partial documentation; bits 10-15 are extracted-from-vanilla.
     /// </summary>
-    /// <param name="radius">Radius in units around NPC's current location (default: 500)</param>
-    public PackageBuilder AsSandbox(uint radius = 500)
+    /// <param name="radius">Radius in units around the actor (default 1024,
+    /// matching DefaultSandboxCurrentLocation1024).</param>
+    public PackageBuilder AsSandbox(uint radius = 1024)
     {
-        // Set flags for sandbox behavior
-        _package.Flags |= Package.Flag.AllowSwimming;
-        _package.InteruptFlags |= Package.InterruptFlag.AllowIdleChatter;
-        _package.InteruptFlags |= Package.InterruptFlag.WorldInteractions;
-
-        // Add location data - sandbox around current location
-        var locationData = new PackageDataLocation
+        // Slot 0: Location data - PLDT type=12 (NearSelf), no FormID, given
+        // radius. Mutagen routes type=12 through LocationFallback (anything
+        // not in {NearReference, InCell, ObjectID, ObjectType,
+        // LinkedReference} goes through the fallback writer).
+        _package.Data[(sbyte)0] = new PackageDataLocation
         {
-            Name = "SandboxLocation",
+            Name = "Location",
             Location = new LocationTargetRadius
             {
-                Target = new LocationTarget(), // Empty = near self
+                Target = new LocationFallback
+                {
+                    Type = LocationTargetRadius.LocationType.NearSelf,
+                    Data = 0
+                },
                 Radius = radius
             }
         };
-        var locIndex = _nextDataIndex++;
-        _package.Data[(sbyte)locIndex] = locationData;
 
-        // Add procedure branch for sandbox behavior
+        // Slots 1, 3-7, 14, 25, 27, 31: ten Bool inputs. Values lifted from
+        // DefaultSandboxCurrentLocation1024. The Sandbox template's
+        // procedure tree reads these as specific behavior toggles:
+        //   slot 1 = Allow Eating
+        //   slot 3 = Allow Sleeping
+        //   slot 4 = Allow Conversation
+        //   slot 5 = Allow Idle Markers
+        //   slot 6 = Allow Sitting
+        //   slot 7 = Allow Wandering   <- the toggle that gates visible movement
+        //   slot 14 = Unlock On Arrival
+        //   slots 25/27/31 = Preferred Path On / Ride Horse / Allow Special Furniture
+        _package.Data[(sbyte)1]  = new PackageDataBool { Name = "Bool",  Data = true  };
+        _package.Data[(sbyte)3]  = new PackageDataBool { Name = "Bool",  Data = true  };
+        _package.Data[(sbyte)4]  = new PackageDataBool { Name = "Bool",  Data = true  };
+        _package.Data[(sbyte)5]  = new PackageDataBool { Name = "Bool",  Data = true  };
+        _package.Data[(sbyte)6]  = new PackageDataBool { Name = "Bool",  Data = true  };
+        _package.Data[(sbyte)7]  = new PackageDataBool { Name = "Bool",  Data = true  };
+        _package.Data[(sbyte)14] = new PackageDataBool { Name = "Bool",  Data = false };
+        _package.Data[(sbyte)25] = new PackageDataBool { Name = "Bool",  Data = false };
+        _package.Data[(sbyte)27] = new PackageDataBool { Name = "Bool",  Data = false };
+        _package.Data[(sbyte)31] = new PackageDataBool { Name = "Bool",  Data = true  };
+
+        // Slot 29: Float (Energy in the template's BNAM labels). Vanilla value.
+        _package.Data[(sbyte)29] = new PackageDataFloat { Name = "Float", Data = 50.0f };
+        _nextDataIndex = 32;
+
+        // Procedure tree stub. The Sandbox template provides the real tree;
+        // the engine ignores ours when a PackageTemplate is set. We still
+        // emit a placeholder branch so the binary layout matches what
+        // Mutagen-built packages produce in other working cases (our Travel
+        // fix kept a similar placeholder and the engine accepted it).
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Sandbox"
         };
-        branch.DataInputIndices.Add(locIndex);
+        branch.DataInputIndices.Add(0);
         _package.ProcedureTree.Add(branch);
+
+        // Vanilla template-using Sandboxes emit Flags=0. Drop the
+        // constructor's OffersServices (merchant) default that's wrong for
+        // every package type except Vendor.
+        _package.Flags = 0;
+
+        // PreferredSpeed = Run (PKDT byte 6 = 2). Matches the vanilla gold
+        // standard. The constructor's Walk default makes sandboxing actors
+        // dawdle visibly.
+        _package.PreferredSpeed = Package.Speed.Run;
+
+        // InterruptFlags = 0x0000FEFF. Mutagen names bits 0-9 (skipping
+        // bit 8 which is unused); bits 10-15 (mask 0xFC00) aren't in the
+        // enum but vanilla sandboxing packages set them and the engine
+        // requires them for visible interrupt response. Cast adds the
+        // unnamed bits.
+        _package.InteruptFlags =
+              Package.InterruptFlag.HellosToPlayer
+            | Package.InterruptFlag.RandomConversations
+            | Package.InterruptFlag.ObserveCombatBehavior
+            | Package.InterruptFlag.GreetCorpseBehavior
+            | Package.InterruptFlag.ReactionToPlayerActions
+            | Package.InterruptFlag.FriendlyFireComments
+            | Package.InterruptFlag.AggroRadiusBehavior
+            | Package.InterruptFlag.AllowIdleChatter
+            | Package.InterruptFlag.WorldInteractions
+            | (Package.InterruptFlag)0xFC00;
+
+        // Schedule = any time (-1s). Mutagen's all-zero default reads as
+        // "midnight, 0 duration" which the engine treats as "never run".
+        _package.ScheduleMonth     = -1;
+        _package.ScheduleDayOfWeek = (Package.DayOfWeek)(-1);
+        _package.ScheduleHour      = -1;
+        _package.ScheduleMinute    = -1;
+
+        // PKCU DataInputVersion = 10 (the Sandbox template's expected hash).
+        _package.DataInputVersion = 10;
+
+        // Reference vanilla Skyrim.esm "Sandbox" template at 0x0001C254.
+        // Without the template, the engine has nowhere to look up the
+        // Sandbox procedure logic and the package never runs.
+        var sandboxTemplate = new FormKey(
+            ModKey.FromFileName("Skyrim.esm"),
+            0x0001C254u);
+        _package.PackageTemplate.SetTo(sandboxTemplate);
 
         return this;
     }
@@ -70,28 +172,156 @@ public class PackageBuilder
     /// <param name="destinationRef">FormKey of destination marker/reference</param>
     public PackageBuilder AsTravel(FormKey destinationRef)
     {
-        // Add target data for travel destination
+        // Emits a Type=18 Travel package matching vanilla Braith's
+        // (0x0010DE9F) structure byte-for-byte where it matters:
+        //   - References Skyrim.esm Travel template (0x00016FAA)
+        //   - 3 data inputs at sequential indices: Location, Bool, Bool
+        //     (template expects exactly these in this order)
+        //   - Schedule = "any time" (Month/DayOfWeek/Hour/Minute = -1)
+        //   - DataInputVersion = 3 (matches template's input count, the
+        //     hash-like trailing int in PKCU)
+        //   - Flags = MustComplete | IgnoreCombat (vanilla travel default)
+
+        // Data input slot indices match vanilla Braith's UNAM markers (0, 2,
+        // 4 - sparse, not 0/1/2 sequential). The "Travel" template's
+        // procedure references these specific slot IDs to bind inputs;
+        // putting Bools at 1/3 would leave the template's expected 2/4
+        // slots empty.
+
+        // Slot 0: Location pointing at the destination REFR.
+        _package.Data[(sbyte)0] = new PackageDataLocation
+        {
+            Name = "Place to Travel",
+            Location = new LocationTargetRadius
+            {
+                Target = new LocationTarget
+                {
+                    Link = destinationRef.ToLink<IPlacedGetter>()
+                },
+                Radius = 0
+            }
+        };
+
+        // Slot 2: "Ride Horse if possible?" Bool.
+        _package.Data[(sbyte)2] = new PackageDataBool
+        {
+            Name = "Ride Horse if possible?",
+            Data = false
+        };
+
+        // Slot 4: "Prefer Preferred Path?" Bool.
+        _package.Data[(sbyte)4] = new PackageDataBool
+        {
+            Name = "Prefer Preferred Path?",
+            Data = false
+        };
+        _nextDataIndex = 5;
+
+        // Procedure tree: a single "Procedure"-type branch with ProcedureType
+        // "Travel" referencing data input slot 0.
+        var branch = new PackageBranch
+        {
+            BranchType = "Procedure",
+            ProcedureType = "Travel"
+        };
+        branch.DataInputIndices.Add(0);
+        _package.ProcedureTree.Add(branch);
+
+        // Travel-appropriate top-level fields. OffersServices (constructor
+        // default) is a merchant flag, irrelevant.
+        _package.Flags = Package.Flag.MustComplete | Package.Flag.IgnoreCombat;
+
+        // Schedule = always available. Vanilla emits Month=-1, DayOfWeek=-1,
+        // Hour=-1, Minute=-1 (Date stays 0; it's unsigned). All-zeros (the
+        // Mutagen default) reads as "midnight, 0 duration" - effectively
+        // "never run."
+        _package.ScheduleMonth     = -1;
+        _package.ScheduleDayOfWeek = (Package.DayOfWeek)(-1);
+        _package.ScheduleHour      = -1;
+        _package.ScheduleMinute    = -1;
+
+        // PKCU last int: the template's "input count" expectation - vanilla
+        // shows 3 for Travel-template-based packages. Mutagen exposes this
+        // as DataInputVersion.
+        _package.DataInputVersion = 3;
+
+        // Template reference: vanilla "Travel" at Skyrim.esm:0x00016FAA. The
+        // engine reads the procedure logic from the template; our package
+        // overrides only the data inputs.
+        var travelTemplate = new FormKey(
+            ModKey.FromFileName("Skyrim.esm"),
+            0x00016FAAu);
+        _package.PackageTemplate.SetTo(travelTemplate);
+
+        return this;
+    }
+
+    /// <summary>
+    /// Configure package as Travel type targeting a quest alias. The package's
+    /// target resolves at runtime to whatever REFR fills the alias.
+    ///
+    /// IMPORTANT: alias-targeted packages MUST have their OwnerQuest set
+    /// (via WithOwnerQuest) so the engine can resolve the alias index
+    /// against that quest's Aliases list. Call WithOwnerQuest BEFORE running
+    /// the package in-game; the order of fluent calls doesn't matter, but
+    /// both must end up set.
+    ///
+    /// Sets Flags = MustComplete | IgnoreCombat to override the constructor's
+    /// OffersServices default (which is a merchant flag, irrelevant to travel).
+    /// Skyrim Package records have no Priority field; alias-attached package
+    /// precedence is determined by ordering within alias.PackageData.
+    /// </summary>
+    /// <param name="aliasIndex">ID of the alias in the owner quest's Aliases list</param>
+    public PackageBuilder AsTravelToAlias(int aliasIndex)
+    {
         var targetData = new PackageDataTarget
         {
             Name = "TravelDestination",
             Type = PackageDataTarget.Types.SingleRef,
-            Target = new PackageTargetSpecificReference
-            {
-                Reference = destinationRef.ToLink<IPlacedObjectGetter>()
-            }
+            Target = new PackageTargetAlias { Alias = aliasIndex }
         };
         var targetIndex = _nextDataIndex++;
         _package.Data[(sbyte)targetIndex] = targetData;
 
-        // Add procedure branch for travel
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Travel"
         };
         branch.DataInputIndices.Add(targetIndex);
         _package.ProcedureTree.Add(branch);
 
+        // OffersServices (the constructor's default) is a merchant flag and
+        // wrong for travel. Use MustComplete + IgnoreCombat - the standard
+        // vanilla travel pair. Skyrim Package records have no Priority field;
+        // call-site is expected to use ActorUtil.AddPackageOverride to push
+        // this onto a specific actor with explicit priority.
+        _package.Flags = Package.Flag.MustComplete | Package.Flag.IgnoreCombat;
+
+        // Reference vanilla Skyrim.esm "Travel" template (FormID 0x00016FAA).
+        // Vanilla Type=18 packages get their procedure logic (the actual
+        // "navmesh to destination" behavior) from this template. Without
+        // it, the engine treats our embedded ProcedureTree as advisory and
+        // the package never actually executes. Discovered by byte-diffing
+        // our PACK record against vanilla WhiterunKidFightSceneBraithTravel
+        // (0x0010DE9F) which references 0x00016FAA as its template.
+        var travelTemplate = new FormKey(
+            ModKey.FromFileName("Skyrim.esm"),
+            0x00016FAAu);
+        _package.PackageTemplate.SetTo(travelTemplate);
+
+        return this;
+    }
+
+    /// <summary>
+    /// Set the package's owning Quest. Required when the package's target
+    /// uses an alias index - the engine resolves alias indices against this
+    /// quest's Aliases list. For non-alias packages this is optional.
+    /// </summary>
+    /// <param name="questFormKey">FormKey of the owning Quest record.</param>
+    public PackageBuilder WithOwnerQuest(FormKey questFormKey)
+    {
+        _package.OwnerQuest.SetTo(questFormKey);
         return this;
     }
 
@@ -132,7 +362,7 @@ public class PackageBuilder
         // Add procedure branch for sleep
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Sleep"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -175,7 +405,7 @@ public class PackageBuilder
         // Add procedure branch for eat
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Eat"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -185,35 +415,164 @@ public class PackageBuilder
     }
 
     /// <summary>
-    /// Configure package as Follow type for following an actor.
+    /// Configure package as Follow type for following an actor referenced by a
+    /// FormKey (static REFR). The package references vanilla Skyrim.esm "Follow"
+    /// template (FormID 0x00019B2C) which provides the actual procedure logic;
+    /// our derived PACK supplies the data dictionary that overrides the
+    /// template's defaults. See AsFollowToAlias for the alias-target variant
+    /// (the one the _GaiusMissions M5.6 framework consumes).
     /// </summary>
-    /// <param name="targetRef">FormKey of actor to follow</param>
-    /// <param name="followDistance">Distance to maintain from target (default: 200 units)</param>
-    public PackageBuilder AsFollow(FormKey targetRef, ushort followDistance = 200)
+    /// <param name="targetRef">FormKey of actor to follow.</param>
+    /// <param name="minRadius">Closest distance follower maintains. Below this
+    /// the follower stops walking. Vanilla template default 128.</param>
+    /// <param name="maxRadius">Furthest distance before the follower runs.
+    /// Matches fFollowStartSprintDistance for the "don't constantly sprint"
+    /// sweet spot. Vanilla template default 256.</param>
+    /// <param name="goToLeadersGoal">"Accompany" in template's data labeling -
+    /// simulates walking WITH the leader (caravan-style) rather than following
+    /// behind. Vanilla template default true.</param>
+    /// <param name="needLOS">If true, follower only follows when it has
+    /// line-of-sight to target. Vanilla template default false.</param>
+    /// <param name="rideHorse">If true, follower will mount a horse when
+    /// possible. Vanilla template default false.</param>
+    public PackageBuilder AsFollow(
+        FormKey targetRef,
+        float minRadius = 128.0f,
+        float maxRadius = 256.0f,
+        bool  goToLeadersGoal = true,
+        bool  needLOS = false,
+        bool  rideHorse = false)
     {
-        // Add target data for follow target
         var targetData = new PackageDataTarget
         {
-            Name = "FollowTarget",
+            Name = "Target to Follow",
             Type = PackageDataTarget.Types.SingleRef,
             Target = new PackageTargetSpecificReference
             {
                 Reference = targetRef.ToLink<IPlacedGetter>()
             }
         };
-        var targetIndex = _nextDataIndex++;
-        _package.Data[(sbyte)targetIndex] = targetData;
+        PopulateFollowDataFromTemplate(
+            targetData, minRadius, maxRadius, goToLeadersGoal, needLOS, rideHorse);
+        return this;
+    }
 
-        // Add procedure branch for follow
+    /// <summary>
+    /// Configure package as Follow type targeting a ReferenceAlias on the
+    /// package's owning quest. Mirrors AsTravelToAlias for alias-bound targets;
+    /// the alias index is interpreted by the engine against the owning quest's
+    /// Aliases list. Call WithOwnerQuest separately to set OwnerQuest, then
+    /// fill the alias at runtime with the actual leader actor.
+    ///
+    /// Slot layout extracted from Skyrim.esm:0x00019B2C ("Follow" vanilla
+    /// template) via tools/inspect_pack:
+    ///   Slot 0: PackageDataTarget "Target to Follow"
+    ///   Slot 1: PackageDataFloat  "Min Radius:"
+    ///   Slot 2: PackageDataFloat  "Max Radius:"
+    ///   Slot 4: PackageDataBool   "Accompany?"   (wiki's GoToLeadersGoal)
+    ///   Slot 6: PackageDataBool   "Ride Horse?"
+    ///   Slot 8: PackageDataBool   "Need LOS?"
+    /// The template's ProcedureTree runs Follow procedure with these slots
+    /// as inputs; our derived package just supplies the data values that
+    /// override the template's defaults.
+    /// </summary>
+    /// <param name="aliasIndex">ID of the alias on the owner quest's Aliases
+    /// list that will hold the actor to follow.</param>
+    /// <param name="minRadius">Closest distance follower maintains.</param>
+    /// <param name="maxRadius">Furthest distance before the follower runs.</param>
+    /// <param name="goToLeadersGoal">If true, walks WITH the leader (caravan-
+    /// style) rather than behind.</param>
+    /// <param name="needLOS">If true, follower only follows when LOS to target.</param>
+    /// <param name="rideHorse">If true, follower mounts a horse when possible.</param>
+    public PackageBuilder AsFollowToAlias(
+        int   aliasIndex,
+        float minRadius = 128.0f,
+        float maxRadius = 256.0f,
+        bool  goToLeadersGoal = true,
+        bool  needLOS = false,
+        bool  rideHorse = false)
+    {
+        var targetData = new PackageDataTarget
+        {
+            Name = "Target to Follow",
+            Type = PackageDataTarget.Types.SingleRef,
+            Target = new PackageTargetAlias { Alias = aliasIndex }
+        };
+        PopulateFollowDataFromTemplate(
+            targetData, minRadius, maxRadius, goToLeadersGoal, needLOS, rideHorse);
+        return this;
+    }
+
+    // Shared Follow-package configuration: slots 0/1/2/4/6/8 match vanilla
+    // Skyrim.esm:0x00019B2C ("Follow") slot layout. Template provides the real
+    // ProcedureTree at runtime; we emit a placeholder branch only so the
+    // binary format matches what Mutagen produces for working Travel packs.
+    private void PopulateFollowDataFromTemplate(
+        PackageDataTarget targetData,
+        float             minRadius,
+        float             maxRadius,
+        bool              goToLeadersGoal,
+        bool              needLOS,
+        bool              rideHorse)
+    {
+        _package.Data[(sbyte)0] = targetData;
+        _package.Data[(sbyte)1] = new PackageDataFloat { Name = "Min Radius:", Data = minRadius };
+        _package.Data[(sbyte)2] = new PackageDataFloat { Name = "Max Radius:", Data = maxRadius };
+        _package.Data[(sbyte)4] = new PackageDataBool  { Name = "Accompany?",  Data = goToLeadersGoal };
+        _package.Data[(sbyte)6] = new PackageDataBool  { Name = "Ride Horse?", Data = rideHorse };
+        _package.Data[(sbyte)8] = new PackageDataBool  { Name = "Need LOS?",   Data = needLOS };
+        _nextDataIndex = 9;
+
+        // Procedure tree placeholder - template provides the real tree.
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Follow"
         };
-        branch.DataInputIndices.Add(targetIndex);
+        branch.DataInputIndices.Add(0);
         _package.ProcedureTree.Add(branch);
 
-        return this;
+        // Flags from the vanilla Follow template (extracted via inspect_pack).
+        _package.Flags = Package.Flag.AllowSwimming;
+
+        // PreferredSpeed = Run (matches template).
+        _package.PreferredSpeed = Package.Speed.Run;
+
+        // InterruptFlags 0xFEFF (= 65279) extracted from template. Mutagen's
+        // enum names bits 0-9 (skipping bit 8 which is unused per Bethesda's
+        // data); bits 10-15 (mask 0xFC00) aren't named in the enum but vanilla
+        // sandboxing/follow packages set them and the engine requires them.
+        // Construction matches the AsSandbox helper so the bit pattern is
+        // identical to the template's 0xFEFF.
+        _package.InteruptFlags =
+              Package.InterruptFlag.HellosToPlayer
+            | Package.InterruptFlag.RandomConversations
+            | Package.InterruptFlag.ObserveCombatBehavior
+            | Package.InterruptFlag.GreetCorpseBehavior
+            | Package.InterruptFlag.ReactionToPlayerActions
+            | Package.InterruptFlag.FriendlyFireComments
+            | Package.InterruptFlag.AggroRadiusBehavior
+            | Package.InterruptFlag.AllowIdleChatter
+            | Package.InterruptFlag.WorldInteractions
+            | (Package.InterruptFlag)0xFC00;
+
+        // Schedule = any time (-1s). Mutagen's all-zero default reads as
+        // "midnight, 0 duration" = "never run".
+        _package.ScheduleMonth     = -1;
+        _package.ScheduleDayOfWeek = (Package.DayOfWeek)(-1);
+        _package.ScheduleHour      = -1;
+        _package.ScheduleMinute    = -1;
+
+        // PKCU DataInputVersion = 4 extracted from template.
+        _package.DataInputVersion = 4;
+
+        // Reference vanilla Skyrim.esm "Follow" template at 0x00019B2C.
+        // Without the template, the engine has no procedure tree to bind
+        // our data slots to and the package never executes.
+        var followTemplate = new FormKey(
+            ModKey.FromFileName("Skyrim.esm"),
+            0x00019B2Cu);
+        _package.PackageTemplate.SetTo(followTemplate);
     }
 
     /// <summary>
@@ -238,7 +597,7 @@ public class PackageBuilder
         // Add procedure branch for guard
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Guard"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -273,7 +632,7 @@ public class PackageBuilder
         // Add procedure branch for patrol
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Patrol"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -305,7 +664,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "UseItemAt"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -337,7 +696,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Sit"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -369,7 +728,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "UseIdleMarker"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -402,7 +761,7 @@ public class PackageBuilder
 
             var branch = new PackageBranch
             {
-                BranchType = "0",
+                BranchType = "Procedure",
                 ProcedureType = "Flee"
             };
             branch.DataInputIndices.Add(targetIndex);
@@ -413,7 +772,7 @@ public class PackageBuilder
             // Flee from combat (no specific target)
             var branch = new PackageBranch
             {
-                BranchType = "0",
+                BranchType = "Procedure",
                 ProcedureType = "Flee"
             };
             _package.ProcedureTree.Add(branch);
@@ -462,7 +821,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Accompany"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -494,7 +853,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "CastMagic"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -525,7 +884,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Dialogue"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -556,7 +915,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Find"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -587,7 +946,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Ambush"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -625,7 +984,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Wander"
         };
         branch.DataInputIndices.Add(locationIndex);
@@ -656,7 +1015,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Wait"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -687,7 +1046,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Activate"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -718,7 +1077,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Relax"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -749,7 +1108,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "ForceGreet"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -767,7 +1126,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Greet"
         };
 
@@ -815,7 +1174,7 @@ public class PackageBuilder
 
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "UseWeapon"
         };
         branch.DataInputIndices.Add(weaponIndex);
@@ -864,7 +1223,7 @@ public class PackageBuilder
 
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "UseMagic"
         };
         branch.DataInputIndices.Add(spellIndex);
@@ -899,7 +1258,7 @@ public class PackageBuilder
     {
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "LockDoors"
         };
 
@@ -933,7 +1292,7 @@ public class PackageBuilder
     {
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "UnlockDoors"
         };
 
@@ -967,7 +1326,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Dismount"
         };
         _package.ProcedureTree.Add(branch);
@@ -997,7 +1356,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Acquire"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -1042,7 +1401,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Escort"
         };
         branch.DataInputIndices.Add(escortIndex);
@@ -1074,7 +1433,7 @@ public class PackageBuilder
 
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Say"
         };
         branch.DataInputIndices.Add(topicIndex);
@@ -1123,7 +1482,7 @@ public class PackageBuilder
 
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Shout"
         };
         branch.DataInputIndices.Add(shoutIndex);
@@ -1186,7 +1545,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "FollowTo"
         };
         branch.DataInputIndices.Add(followIndex);
@@ -1218,7 +1577,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "HoldPosition"
         };
         branch.DataInputIndices.Add(positionIndex);
@@ -1249,7 +1608,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "KeepAnEyeOn"
         };
         branch.DataInputIndices.Add(targetIndex);
@@ -1284,7 +1643,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Hover"
         };
         branch.DataInputIndices.Add(locationIndex);
@@ -1319,7 +1678,7 @@ public class PackageBuilder
         // Add procedure branch
         var branch = new PackageBranch
         {
-            BranchType = "0",
+            BranchType = "Procedure",
             ProcedureType = "Orbit"
         };
         branch.DataInputIndices.Add(locationIndex);
