@@ -1,6 +1,6 @@
 ---
 name: skyrim-skse
-description: Create, build, and manage SKSE C++ plugin projects. Use when the user wants to create native plugins, build them with CMake, add Papyrus native functions, or extend Skyrim's functionality at the native level.
+description: Create, build, and manage SKSE C++ plugin projects. Use when the user wants to create native plugins, build them with xmake, add Papyrus native functions, or extend Skyrim's functionality at the native level.
 ---
 
 # Skyrim SKSE Module
@@ -21,11 +21,11 @@ cd "<TOOLKIT_PATH>"
 
 | Tool | Purpose | Installation |
 |------|---------|--------------|
-| **CMake 3.21+** | Build system | [Download](https://cmake.org/download/) |
+| **xmake 2.8+** | Build system | [Download](https://xmake.io) |
 | **MSVC Build Tools** | C++ compiler | [MSVC Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) |
-| vcpkg | Dependencies | Auto-bootstrapped by project |
+| xmake-repo | Dependencies | Auto-resolved on first build (`commonlibsse-ng`, `fmt`, `spdlog`) |
 
-**Note:** You do NOT need the full Visual Studio IDE - only the MSVC Build Tools (C++ compiler). The Build Tools can be installed standalone without Visual Studio.
+**Note:** You do NOT need the full Visual Studio IDE - only the MSVC Build Tools (C++ compiler). xmake auto-detects MSVC (including VS 18 / 2026 preview).
 
 ## Overview
 
@@ -90,10 +90,10 @@ dotnet run --project src/SpookysAutomod.Cli -- skse add-function "<project>" --n
 # 1. Create project
 dotnet run --project src/SpookysAutomod.Cli -- skse create "MyPlugin" --output "./" --author "YourName"
 
-# 2. Build (requires CMake and MSVC)
+# 2. Build (requires xmake and MSVC)
 dotnet run --project src/SpookysAutomod.Cli -- skse build "./MyPlugin"
 
-# Output: MyPlugin/build/Release/MyPlugin.dll
+# Output: MyPlugin/build/windows/x64/release/MyPlugin.dll
 ```
 
 ### Create Plugin with Papyrus Functions
@@ -145,37 +145,46 @@ Examples:
 
 ```
 MyPlugin/
-  CMakeLists.txt          # CMake build configuration
-  vcpkg.json              # C++ dependencies
-  skse_config.json        # Toolkit configuration
+  xmake.lua               # xmake build configuration
+  skse-project.json       # Toolkit configuration
+  README.md               # Per-project build instructions (basic template)
   src/
+    PCH.h                 # Precompiled header (basic template)
     main.cpp              # SKSE plugin entry point
-    plugin.cpp            # Plugin implementation
-    plugin.h              # Plugin header
-  cmake/
-    CommonLibSSE.cmake    # CommonLibSSE-NG integration
+    plugin.cpp            # Plugin implementation (papyrus-native template)
+    plugin.h              # Plugin header (papyrus-native template)
+    papyrus.cpp           # Papyrus native registration (papyrus-native)
+    papyrus.h             # Papyrus native header (papyrus-native)
 ```
+
+`commonlibsse-ng`, `fmt`, and `spdlog` are resolved by xmake-repo on first build — they are not committed to the project directory.
 
 ## Template Details
 
 ### basic Template
 Minimal plugin with:
-- Modern C++20 plugin metadata (`.RuntimeCompatibility()`)
-- Precompiled headers (PCH) for fast builds
-- Comprehensive event handler examples (OnHit, OnEquip)
+- Modern CommonLibSSE-NG plugin metadata (`SKSEPluginInfo` + `SKSEPluginLoad` macros)
+- Precompiled header (PCH) wired via xmake's `set_pcxxheader`
+- One worked event-sink example (OnHit)
 - Safe NiPointer and Actor casting patterns
-- Correct form lookup methods (EditorID vs FormID)
-- Logging setup
-- Message handler for game events
+- Logging via spdlog
+- Message handler for game events (`kDataLoaded`, `kPostLoad`)
 
 **Modern API Features:**
 ```cpp
-// Modern plugin version declaration
-extern "C" __declspec(dllexport) constinit SKSE::PluginVersionData SKSEPlugin_Version = [] {
-    SKSE::PluginVersionData data{};
-    data.RuntimeCompatibility(SKSE::RuntimeCompatibility::Independent);
-    return data;
-}();
+// Modern plugin metadata (designated-initializer macro)
+SKSEPluginInfo(
+    .Version = REL::Version{ 1, 0, 0, 0 },
+    .Name    = PLUGIN_NAME,
+    .Author  = PLUGIN_AUTHOR
+)
+
+// Modern entry point
+SKSEPluginLoad(const SKSE::LoadInterface* skse)
+{
+    SKSE::Init(skse);
+    return true;
+}
 
 // Safe NiPointer handling
 auto target = event->target.get();  // Get raw pointer
@@ -186,10 +195,10 @@ auto form = RE::TESForm::LookupByEditorID("MyForm"sv);  // By EditorID
 auto form = RE::TESForm::LookupByID(0x00012EB7);  // By FormID
 ```
 
-**Build Options:**
-- VCPKG (automatic dependency management)
-- Manual vendor/ folder (no VCPKG required)
-- Windows CMD build script included (`build.bat`)
+**Build path:**
+- xmake-repo resolves `commonlibsse-ng v3.7.0`, `fmt`, `spdlog` automatically
+- No vcpkg, no FetchContent, no manual vendor/ folder
+- Run `xmake` from the project root (or use `skse build`)
 
 ### papyrus-native Template
 Includes everything in `basic` plus:
@@ -266,16 +275,18 @@ dotnet run --project src/SpookysAutomod.Cli -- skse build "./MyPlugin" --clean
 dotnet run --project src/SpookysAutomod.Cli -- skse build "./MyPlugin" --json
 ```
 
-### Manual CMake Build
+### Manual xmake Build
 ```bash
 cd MyPlugin
-cmake -B build -S .
-cmake --build build --config Release
+xmake            # configures + builds (first run downloads deps via xmake-repo)
+xmake build      # subsequent incremental builds
+xmake config -m debug   # switch to Debug
+xmake clean             # clean artifacts
 ```
 
 ### Output Location
-- Release: `build/Release/MyPlugin.dll`
-- Debug: `build/Debug/MyPlugin.dll`
+- Release: `build/windows/x64/release/MyPlugin.dll`
+- Debug: `build/windows/x64/debug/MyPlugin.dll`
 
 ## Installing SKSE Plugins
 
@@ -287,13 +298,13 @@ cmake --build build --config Release
 
 This module **CAN**:
 - Generate project scaffolding
-- Build projects end-to-end via `skse build` (requires CMake + MSVC)
+- Build projects end-to-end via `skse build` (requires xmake + MSVC)
 - Add Papyrus native function stubs
 - Manage project configuration
 
 This module **CANNOT**:
 - Write custom C++ logic (generates stubs/templates)
-- Auto-install build tools (user must install CMake and MSVC)
+- Auto-install build tools (user must install xmake and MSVC)
 - Debug plugins
 - Generate complex game hooks
 
@@ -303,12 +314,12 @@ For advanced SKSE development:
 
 ## Important Notes
 
-1. **Build tools required** - CMake and MSVC Build Tools needed (NOT full Visual Studio IDE)
-2. **Single codebase, all versions** - CommonLibSSE-NG handles version differences
-3. **vcpkg auto-bootstraps** - Dependencies downloaded on first build (~5 minutes first time)
+1. **Build tools required** - xmake and MSVC Build Tools needed (NOT full Visual Studio IDE)
+2. **Single codebase, all versions** - CommonLibSSE-NG handles version differences (SE + AE by default; flip `skyrim_vr = true` in `xmake.lua` for VR)
+3. **xmake-repo auto-resolves deps** - `commonlibsse-ng`, `fmt`, `spdlog` downloaded on first build (~5 minutes first time, cached at `%LOCALAPPDATA%\.xmake\packages\` after)
 4. **Native functions need matching Papyrus declarations** - Script must declare functions as `native`
 5. **Use `--json` flag** for machine-readable output when scripting
-6. **LLMs can build plugins** - Use Bash tool to invoke CMake commands for end-to-end workflow
+6. **LLMs can build plugins** - Use Bash tool to invoke `xmake` (or `skse build`) for end-to-end workflow
 
 ## JSON Output
 

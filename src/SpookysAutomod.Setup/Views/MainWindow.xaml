@@ -416,7 +416,7 @@
                                FontSize="18" FontWeight="SemiBold"
                                Foreground="{StaticResource TextPrimaryBrush}"
                                Margin="0,0,0,8" />
-                    <TextBlock Text="Checking required build tools. .NET 8 is required for the toolkit. CMake and MSVC are needed for building SKSE C++ plugins."
+                    <TextBlock Text="Checking required build tools. .NET 8 is required for the toolkit. xmake and MSVC are needed for building SKSE C++ plugins."
                                FontSize="13" Foreground="{StaticResource TextSecondaryBrush}"
                                Margin="0,0,0,16" TextWrapping="Wrap" />
 
@@ -443,25 +443,25 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- CMake -->
+                    <!-- xmake -->
                     <Border Style="{StaticResource CardPanel}" Margin="0,0,0,12">
                         <StackPanel>
-                            <TextBlock Text="CMake 3.24+ (For SKSE Plugins)"
+                            <TextBlock Text="xmake 2.8+ (For SKSE Plugins)"
                                        FontSize="14" FontWeight="SemiBold"
                                        Foreground="{StaticResource TextPrimaryBrush}" />
-                            <TextBlock Text="{Binding CMakeStatus}"
+                            <TextBlock Text="{Binding XmakeStatus}"
                                        FontSize="12" Foreground="{StaticResource TextSecondaryBrush}"
                                        Margin="0,6,0,0" TextWrapping="Wrap" />
 
                             <TextBlock Text="Installed"
                                        Style="{StaticResource StatusSuccess}"
                                        Margin="0,8,0,0"
-                                       Visibility="{Binding CMakeOk, Converter={StaticResource BoolToVis}}" />
+                                       Visibility="{Binding XmakeOk, Converter={StaticResource BoolToVis}}" />
 
                             <TextBlock Style="{StaticResource StatusWarning}"
                                        Margin="0,8,0,0"
-                                       Visibility="{Binding CMakeOk, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}">
-                                <Run Text="Optional - Download: https://cmake.org/download/" />
+                                       Visibility="{Binding XmakeOk, Converter={StaticResource BoolToVis}, ConverterParameter=Invert}">
+                                <Run Text="Optional - Download: https://xmake.io" />
                             </TextBlock>
                         </StackPanel>
                     </Border>

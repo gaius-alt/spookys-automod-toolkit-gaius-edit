@@ -32,7 +32,7 @@ src/
 ├── SpookysAutomod.Nif/         # 3D mesh inspection
 ├── SpookysAutomod.Mcm/         # MCM menu generation
 ├── SpookysAutomod.Audio/       # Voice file processing
-├── SpookysAutomod.Skse/        # SKSE C++ scaffolding
+├── SpookysAutomod.Skse/        # SKSE C++ scaffolding (xmake-driven)
 └── SpookysAutomod.Setup/       # WPF setup wizard (GUI)
 ```
 
@@ -273,6 +273,15 @@ if (result.ExitCode != 0) {
 - **Champollion** - Papyrus decompiler
 - **BSArch** - Archive tool (manual download - xEdit licensing)
 
+**SKSE Plugin Build Toolchain (this fork):**
+
+- **xmake 2.8+** - Drives the SKSE plugin build (replaces CMake from upstream).
+- **commonlibsse-ng / fmt / spdlog** - Resolved via xmake-repo on first `skse build`.
+- **MSVC Build Tools** - Detected by xmake automatically (incl. VS 18 / 2026 preview).
+- See `SpookysAutomod.Skse.Services.SkseProjectService.BuildProjectAsync` for the
+  `xmake config` + `xmake build` invocation. `CheckCMakeAsync` is kept as an
+  `[Obsolete]` shim that forwards to `CheckXmakeAsync`; do not call it in new code.
+
 ---
 
 ## Testing Strategy
@@ -317,6 +326,28 @@ if (result.ExitCode != 0) {
 **Maintained By:** Project team
 
 **Philosophy:** AI-first design - all commands support `--json`, provide helpful error suggestions, and enable autonomous AI workflows
+
+---
+
+## Fork notes
+
+This is a downstream fork (`gaius-alt/spookys-automod-toolkit-gaius-edit`) of upstream
+`SpookyPirate/spookys-automod-toolkit`. The SKSE plugin build path is rewritten to
+use **xmake** instead of CMake/vcpkg:
+
+- `skse create` now scaffolds `xmake.lua` (no `CMakeLists.txt`, no `vcpkg.json`).
+- `skse build` invokes `xmake config` + `xmake build` instead of `cmake`.
+- Template `main.cpp` uses the modern `SKSEPluginInfo` + `SKSEPluginLoad` macros;
+  the legacy `SKSEPlugin_Query` / `UsesUpdatedStructs()` boilerplate that broke
+  against CommonLibSSE-NG v3.7.0 is gone.
+- Templates' `OnHit` example uses `TESHitEvent::source` (the field that actually
+  exists) and wraps `Actor::GetName()` returns in `std::string_view` so fmt 12's
+  strict format-string check is happy.
+- Setup wizard probes `xmake` instead of `cmake`.
+
+Backwards compatibility: `CheckCMakeAsync` (service) and `CheckCMake` (setup
+service) are `[Obsolete]` shims that forward to the xmake check, so callers that
+linked against the old API keep compiling.
 
 ---
 

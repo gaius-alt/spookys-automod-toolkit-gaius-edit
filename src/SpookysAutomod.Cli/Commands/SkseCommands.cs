@@ -66,7 +66,7 @@ public static class SkseCommands
                     Console.WriteLine("Next steps:");
                     Console.WriteLine($"  cd {result.Value}");
                     Console.WriteLine("  Run 'skse build .' to build the plugin");
-                    Console.WriteLine("  Or manually: cmake -B build -S . && cmake --build build --config Release");
+                    Console.WriteLine("  Or manually: xmake (first run downloads commonlibsse-ng + deps via xmake-repo)");
                 }
                 else
                 {
@@ -89,7 +89,7 @@ public static class SkseCommands
 
     private static Command CreateBuildCommand(Option<bool> jsonOption, Option<bool> verboseOption)
     {
-        var command = new Command("build", "Build an SKSE plugin project using CMake");
+        var command = new Command("build", "Build an SKSE plugin project using xmake");
 
         var projectArg = new Argument<string>("project", () => ".", "Project directory");
         var configOpt = new Option<string>("--config", () => "Release", "Build configuration (Release or Debug)");

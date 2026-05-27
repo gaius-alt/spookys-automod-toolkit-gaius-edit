@@ -10,6 +10,21 @@
 
 ---
 
+## Fork notes
+
+This is a downstream fork of [SpookyPirate/spookys-automod-toolkit](https://github.com/SpookyPirate/spookys-automod-toolkit). The differences from upstream are:
+
+- **SKSE plugin build path migrated from CMake → xmake.** `skse create` scaffolds `xmake.lua` instead of `CMakeLists.txt` + `vcpkg.json`; `skse build` shells out to `xmake config` + `xmake build`. xmake auto-detects MSVC (including VS 18 / 2026 preview, which the upstream vcpkg-pinned setup did not recognise) and resolves `commonlibsse-ng`, `fmt`, and `spdlog` via xmake-repo on first run.
+- **Setup wizard probes `xmake` instead of `cmake`** (UI labels and `CheckXmake` / `XmakeStatus` / `XmakeOk` bindings updated). Old `CheckCMake` / `CheckCMakeAsync` remain as `[Obsolete]` shims that forward to the new check so any external caller still compiles.
+- **Template `main.cpp` rewritten** to use the modern CommonLibSSE-NG `SKSEPluginInfo` + `SKSEPluginLoad` macros. The legacy `SKSEPlugin_Query` / `UsesUpdatedStructs()` / `CompatibleVersions()` boilerplate that no longer compiles against v3.7.0 is gone.
+- **Template's `OnHit` event-sink example** swapped to use `TESHitEvent::source` (real field) and `std::string_view` wrapping for `GetName()` (fmt 12 strict format-string check).
+- Removed from the basic template: `CMakeLists.txt`, `build.bat`, `src/main.cpp.old`. Added: `xmake.lua`. The papyrus-native template followed the same pattern.
+- Plus the upstream-feature commit it carries: `esp add-refr` + Travel/Follow alias-target package builders.
+
+The xmake migration changes how you set up SKSE plugin building — see the [SKSE C++ Build Tools](#skse-c-build-tools-required-for-skse-plugin-development) section below for current instructions. Everything else (Papyrus, ESP, archive, etc.) works the same as upstream.
+
+---
+
 ## Overview
 
 A command-line toolkit that enables AI assistants (Claude, ChatGPT, etc.) to create and modify Skyrim mods programmatically. Simply describe what you want and let the AI handle the technical work.
@@ -46,14 +61,14 @@ Create new mods, inspect existing ones, edit archives, decompile scripts, view r
    - Link Papyrus script headers automatically
    - Download SKSE headers (SE + VR) and SkyUI headers
    - Download Papyrus compiler and decompiler
-   - Detect CMake and MSVC build tools
+   - Detect xmake and MSVC build tools
    - Build and verify the toolkit
 
 **Option B: Git**
 
 ```bash
-git clone https://github.com/SpookyPirate/spookys-automod-toolkit.git
-cd spookys-automod-toolkit
+git clone https://github.com/gaius-alt/spookys-automod-toolkit-gaius-edit.git
+cd spookys-automod-toolkit-gaius-edit
 dotnet build SpookysAutomod.sln
 ```
 
@@ -153,6 +168,8 @@ The compiler automatically detects and uses these headers when present. See `too
 
 If you plan to create SKSE (Skyrim Script Extender) native plugins, you'll need C++ build tools.
 
+> This fork drives SKSE builds with **xmake**, not CMake. xmake handles dependency resolution (`commonlibsse-ng`, `fmt`, `spdlog`) via xmake-repo, so no vcpkg setup is required.
+
 ### What Are SKSE Plugins?
 
 SKSE plugins are DLL files written in C++ that extend Skyrim's functionality at a native level. They can add new Papyrus functions, hook game events, and access internal game data that scripts cannot.
@@ -161,19 +178,22 @@ SKSE plugins are DLL files written in C++ that extend Skyrim's functionality at 
 
 Building SKSE plugins requires two tools:
 
-1. **CMake** - Build system generator
-2. **MSVC Build Tools** - Microsoft C++ compiler (no Visual Studio IDE needed)
+1. **xmake 2.8+** - Build system that resolves CommonLibSSE-NG and friends from xmake-repo
+2. **MSVC Build Tools** - Microsoft C++ compiler (no Visual Studio IDE needed; xmake also recognises the VS 18 / 2026 preview)
 
 ### Installation
 
-**Step 1: Install CMake**
+**Step 1: Install xmake**
 
-1. Download CMake from: https://cmake.org/download/
-2. Get the Windows x64 Installer (e.g., `cmake-3.28.0-windows-x86_64.msi`)
-3. During installation, select **"Add CMake to the system PATH for all users"**
-4. Verify installation:
+1. Download xmake from: https://xmake.io
+2. Run the Windows installer or, with winget:
+   ```powershell
+   winget install xmake
+   ```
+3. Verify installation:
    ```bash
-   cmake --version
+   xmake --version
+   # Should show: xmake v2.8.x ...
    ```
 
 **Step 2: Install MSVC Build Tools**
@@ -185,7 +205,6 @@ Building SKSE plugins requires two tools:
 5. This includes:
    - MSVC C++ compiler
    - Windows SDK
-   - CMake integration
 6. Click "Install" (requires ~7 GB disk space)
 7. Verify installation:
    ```bash
@@ -196,45 +215,59 @@ Building SKSE plugins requires two tools:
 
 ### Important Notes
 
-- **No IDE Required:** You do NOT need Visual Studio IDE - just the Build Tools
-- **PATH Configuration:** Build Tools should automatically add `cl.exe` to PATH
-- **First Build:** The first build will download vcpkg dependencies (CommonLibSSE-NG) - this takes a few minutes
-- **Target Versions:** Generated plugins work on Skyrim SE, AE, GOG, and VR from a single DLL
+- **No IDE Required:** You do NOT need Visual Studio IDE - just the Build Tools.
+- **PATH Configuration:** Build Tools should automatically add `cl.exe` to PATH. xmake also finds VS installs via the registry, so this is rarely an issue.
+- **First Build:** The first `skse build` resolves `commonlibsse-ng`, `fmt`, and `spdlog` via xmake-repo (~50 MB plus compile time). Subsequent builds are incremental.
+- **Target Versions:** Generated plugins work on Skyrim SE and AE from a single DLL. Toggle `skyrim_vr = true` in the project's `xmake.lua` if you need VR support.
 
 ### Building an SKSE Plugin
 
 Once tools are installed, the complete workflow is:
 
 ```bash
-# 1. Generate project
+# 1. Generate project (writes xmake.lua + src/)
 dotnet run --project src/SpookysAutomod.Cli -- skse create "MyPlugin" --template basic --output "./"
 
 # 2. Build using the toolkit (recommended)
 dotnet run --project src/SpookysAutomod.Cli -- skse build "./MyPlugin"
 
-# Output: MyPlugin/build/Release/MyPlugin.dll
+# Output: MyPlugin/build/windows/x64/release/MyPlugin.dll
 ```
 
-Or build manually with CMake:
+Or build manually with xmake:
 
 ```bash
 cd MyPlugin
-cmake -B build -S .
-cmake --build build --config Release
+xmake          # first run downloads commonlibsse-ng + deps via xmake-repo
+xmake build    # incremental subsequent builds
+```
+
+Useful xmake invocations:
+
+```bash
+xmake config -m debug      # switch to Debug
+xmake config -m release    # switch back to Release
+xmake clean                # clean build artifacts
+xmake -v                   # verbose build
 ```
 
 ### Troubleshooting
 
-**"cmake: command not found"**
-- Restart your terminal after CMake installation
-- Or manually add to PATH: `C:\Program Files\CMake\bin`
+**"xmake: command not found"**
+- Restart your terminal after installing xmake
+- Or manually add to PATH: `C:\Program Files\xmake`
 
-**"'cl' is not recognized"**
-- Open "x64 Native Tools Command Prompt for VS 2022" (installed with Build Tools)
-- Or run: `"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"`
+**"'cl' is not recognized" / "Unable to find a valid Visual Studio instance"**
+- Install or re-install the **MSVC Build Tools 2022** "Desktop development with C++" workload
+- If xmake still can't find your VS 18 / 2026 preview, run `xmake update` to get the latest compiler-detection logic
+- As a last resort, open "x64 Native Tools Command Prompt for VS 2022" and run `xmake` from there
 
 **"Cannot open include file 'windows.h'"**
 - Reinstall Build Tools and ensure "Windows SDK" is selected
+
+**xmake hangs on first build downloading commonlibsse-ng**
+- Needs internet; the package compiles from source (~50 MB download)
+- Cached at `%LOCALAPPDATA%\.xmake\packages\` and reused thereafter
 
 ---
 

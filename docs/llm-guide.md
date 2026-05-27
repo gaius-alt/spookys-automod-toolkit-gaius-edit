@@ -1685,11 +1685,11 @@ dotnet run --project src/SpookysAutomod.Cli -- audio create-fuz "./Audio/line.xw
 
 ### Create and Build Native Plugin
 
-**Requirements:** User must have CMake and MSVC Build Tools installed (see README "SKSE C++ Build Tools" section).
+**Requirements:** User must have xmake and MSVC Build Tools installed (see README "SKSE C++ Build Tools" section).
 
 ```bash
 # 1. Check if build tools are available
-cmake --version
+xmake --version
 cl  # Should show MSVC compiler version
 
 # 2. Create project with Papyrus native function support
@@ -1703,7 +1703,7 @@ dotnet run --project src/SpookysAutomod.Cli -- skse add-function "./MyNativePlug
 dotnet run --project src/SpookysAutomod.Cli -- skse build "./MyNativePlugin" --json
 
 # 5. Output DLL ready to use
-# Result: MyNativePlugin/build/Release/MyNativePlugin.dll
+# Result: MyNativePlugin/build/windows/x64/release/MyNativePlugin.dll
 # Install to: Data/SKSE/Plugins/MyNativePlugin.dll
 ```
 
@@ -1717,7 +1717,7 @@ dotnet run --project src/SpookysAutomod.Cli -- skse build "./MyNativePlugin" --c
 ```
 
 **If build tools missing:**
-- Guide user to install CMake: https://cmake.org/download/
+- Guide user to install xmake: https://xmake.io
 - Guide user to install MSVC Build Tools: https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022
 - See README "SKSE C++ Build Tools" section for detailed setup
 

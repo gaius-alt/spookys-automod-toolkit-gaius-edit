@@ -175,18 +175,18 @@ public class SetupViewModel : INotifyPropertyChanged
         set { _dotNetOk = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanGoNext)); }
     }
 
-    private string _cmakeStatus = "";
-    public string CMakeStatus
+    private string _xmakeStatus = "";
+    public string XmakeStatus
     {
-        get => _cmakeStatus;
-        set { _cmakeStatus = value; OnPropertyChanged(); }
+        get => _xmakeStatus;
+        set { _xmakeStatus = value; OnPropertyChanged(); }
     }
 
-    private bool _cmakeOk;
-    public bool CMakeOk
+    private bool _xmakeOk;
+    public bool XmakeOk
     {
-        get => _cmakeOk;
-        set { _cmakeOk = value; OnPropertyChanged(); }
+        get => _xmakeOk;
+        set { _xmakeOk = value; OnPropertyChanged(); }
     }
 
     private string _msvcStatus = "";
@@ -454,11 +454,11 @@ public class SetupViewModel : INotifyPropertyChanged
             ? $".NET SDK {version} detected"
             : $".NET 8 SDK not found (detected: {version}).\n\nPlease install from: https://dotnet.microsoft.com/download/dotnet/8.0";
 
-        // Also check CMake and MSVC (for SKSE plugin building)
-        var (cmakeInstalled, cmakeVersion) = _service.CheckCMake();
-        CMakeOk = cmakeInstalled;
-        CMakeStatus = cmakeInstalled
-            ? cmakeVersion
+        // Also check xmake and MSVC (for SKSE plugin building)
+        var (xmakeInstalled, xmakeVersion) = _service.CheckXmake();
+        XmakeOk = xmakeInstalled;
+        XmakeStatus = xmakeInstalled
+            ? xmakeVersion
             : "Not found - needed for SKSE plugin building";
 
         var (msvcInstalled, msvcVersion) = _service.CheckMsvc();

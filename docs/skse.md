@@ -6,12 +6,12 @@ The SKSE module handles creation and management of SKSE (Skyrim Script Extender)
 
 SKSE plugins are DLL files that extend Skyrim's functionality at a native level. This module generates project scaffolding using **CommonLibSSE-NG**, which supports Skyrim SE, AE, GOG, and VR from a single codebase.
 
-**Complete Workflow:** This module generates project files that can then be built using CMake. When build tools are installed, AI assistants can generate and build SKSE plugins end-to-end.
+**Complete Workflow:** This module generates project files that can then be built using xmake. When build tools are installed, AI assistants can generate and build SKSE plugins end-to-end.
 
 **Building Requirements:**
-- MSVC Build Tools (no Visual Studio IDE needed)
-- CMake 3.24+
-- Internet connection (first build only - CommonLibSSE-NG downloaded via FetchContent)
+- MSVC Build Tools (no Visual Studio IDE needed; xmake also recognises VS 18 / 2026 preview)
+- xmake 2.8+
+- Internet connection (first build only - `commonlibsse-ng`, `fmt`, `spdlog` downloaded via xmake-repo)
 
 ## Commands
 
@@ -70,12 +70,14 @@ skse create "MyNativePlugin" --template papyrus-native --author "YourName" --out
 **Generated Structure:**
 ```
 MyPlugin/
-  CMakeLists.txt      # FetchContent downloads CommonLibSSE-NG automatically
-  build.bat           # Quick build script
-  README.md           # Build instructions
+  xmake.lua           # xmake build config; resolves commonlibsse-ng + deps via xmake-repo
+  README.md           # Build instructions (basic template)
+  skse-project.json   # Toolkit configuration
   src/
-    PCH.h             # Precompiled header
+    PCH.h             # Precompiled header (basic template only)
     main.cpp          # Plugin entry point
+    plugin.{cpp,h}    # Plugin module (papyrus-native template)
+    papyrus.{cpp,h}   # Native function registration (papyrus-native template)
 ```
 
 ---
@@ -160,7 +162,7 @@ skse add-function "./MyPlugin" --name "GetNearestActor" --return "Actor" --param
 
 ### build
 
-Build an SKSE plugin project using CMake.
+Build an SKSE plugin project using xmake.
 
 ```bash
 skse build <project> [options]
@@ -213,17 +215,17 @@ skse create "MyPlugin" --output "./"
 # 2. Build it
 skse build "./MyPlugin"
 
-# Output: MyPlugin/build/Release/MyPlugin.dll
+# Output: MyPlugin/build/windows/x64/release/MyPlugin.dll
 ```
 
-### Manual CMake Build
+### Manual xmake Build
 
 You can also build manually:
 
 ```bash
 cd MyPlugin
-cmake -B build -S .
-cmake --build build --config Release
+xmake          # configures + builds (first run downloads deps via xmake-repo)
+xmake build    # incremental subsequent builds
 ```
 
 ### Build Requirements
@@ -231,7 +233,7 @@ cmake --build build --config Release
 | Tool | Purpose | Installation |
 |------|---------|--------------|
 | MSVC Build Tools | C++ compiler (no IDE needed) | [Build Tools for Visual Studio](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) |
-| CMake 3.24+ | Build system | [Download](https://cmake.org/download/) |
+| xmake 2.8+ | Build system | [Download](https://xmake.io) |
 
 ---
 
@@ -240,13 +242,20 @@ cmake --build build --config Release
 ### basic
 
 Minimal plugin with:
-- SKSE plugin info
-- Logging setup
-- OnInit hook
+- SKSE plugin info via the modern `SKSEPluginInfo` macro
+- Logging setup via spdlog
+- Message handler (`kDataLoaded`, `kPostLoad`)
+- One worked event-sink example (OnHit)
 
 ```cpp
-extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_skse) {
-    SKSE::Init(a_skse);
+SKSEPluginInfo(
+    .Version = REL::Version{ 1, 0, 0, 0 },
+    .Name    = PLUGIN_NAME,
+    .Author  = PLUGIN_AUTHOR
+)
+
+SKSEPluginLoad(const SKSE::LoadInterface* skse) {
+    SKSE::Init(skse);
     // Your code here
     return true;
 }
@@ -328,15 +337,15 @@ Projects store configuration in `skse_config.json`:
 ## Capabilities and Limitations
 
 This module **can**:
-- Generate project scaffolding (CMakeLists.txt, C++ source files)
+- Generate project scaffolding (xmake.lua, C++ source files)
 - Add Papyrus native function stubs
 - Manage project configuration
-- Build projects end-to-end via `skse build` (when CMake and MSVC Build Tools are installed)
-- Detect CMake and MSVC availability
+- Build projects end-to-end via `skse build` (when xmake and MSVC Build Tools are installed)
+- Detect xmake and MSVC availability
 
 This module **cannot**:
 - Write custom C++ logic (generates stubs and templates only)
-- Auto-install build tools (user must install CMake and MSVC manually)
+- Auto-install build tools (user must install xmake and MSVC manually)
 - Debug plugins
 - Generate complex event hooks
 

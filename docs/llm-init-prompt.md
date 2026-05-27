@@ -194,7 +194,7 @@ esp auto-fill-all (processes all scripts at once)
 **→ Use Workflow 6: SKSE C++ Plugin**
 
 - Native code required
-- User must have CMake + MSVC Build Tools
+- User must have xmake + MSVC Build Tools
 - Check requirements first
 
 **Commands:**
@@ -624,7 +624,7 @@ esp auto-fill-all "LargeMod.esp" \
 - Audio processing (FUZ creation, voice file workflows)
 - Creating compatibility patches between mods
 - Editing existing mods (adding content to other plugins)
-- SKSE C++ plugin development with CMake
+- SKSE C++ plugin development with xmake
 - Complete follower framework examples
 - Advanced troubleshooting patterns
 
@@ -829,7 +829,7 @@ Verify: Does Skyrim.esm exist in this path?
 ### 5. SKSE Build Tools (if building plugins)
 
 ```
-Check: cmake --version
+Check: xmake --version
 Check: cl (MSVC compiler)
 If missing: Guide to README "SKSE C++ Build Tools" section
 ```

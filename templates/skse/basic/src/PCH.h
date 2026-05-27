@@ -1,13 +1,12 @@
 #pragma once
 
 // ========================================
-// Precompiled Header for {{PROJECT_NAME}}
+// Precompiled header for {{PROJECT_NAME}}
 // ========================================
-// This PCH includes CommonLibSSE-NG headers.
-// IMPORTANT: This file is used by CMake target_precompile_headers()
-// DO NOT manually include this in your .cpp files - CMake handles it automatically
+// Wired in via xmake.lua: set_pcxxheader("src/PCH.h"). Do NOT manually
+// #include "PCH.h" in .cpp files — xmake auto-includes it.
 
-// Standard Library
+// Standard library
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -20,17 +19,23 @@
 #include <algorithm>
 #include <ranges>
 
-// C++20 features
 using namespace std::literals;
 
-// CommonLibSSE-NG (automatically includes all RE:: and SKSE:: headers)
+// CommonLibSSE-NG
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
 
-// Version information
-#define MAKE_STR_HELPER(x) #x
-#define MAKE_STR(x) MAKE_STR_HELPER(x)
+#include <spdlog/sinks/basic_file_sink.h>
 
+// Version macros (PLUGIN_NAME / PLUGIN_AUTHOR / PLUGIN_VERSION are -D'd
+// from xmake.lua; defined here as fallbacks in case the build system
+// hasn't injected them).
+#ifndef PLUGIN_NAME
 #define PLUGIN_NAME "{{PROJECT_NAME}}"
+#endif
+#ifndef PLUGIN_AUTHOR
 #define PLUGIN_AUTHOR "{{AUTHOR}}"
-#define PLUGIN_VERSION MAKE_STR({{VERSION_MAJOR}}) "." MAKE_STR({{VERSION_MINOR}}) "." MAKE_STR({{VERSION_PATCH}})
+#endif
+#ifndef PLUGIN_VERSION
+#define PLUGIN_VERSION "{{VERSION_MAJOR}}.{{VERSION_MINOR}}.{{VERSION_PATCH}}"
+#endif

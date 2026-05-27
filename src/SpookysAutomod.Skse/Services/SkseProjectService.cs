@@ -135,16 +135,16 @@ public class SkseProjectService
             var configPath = Path.Combine(projectPath, "skse-project.json");
             if (!File.Exists(configPath))
             {
-                // Try to infer from CMakeLists.txt
-                var cmakePath = Path.Combine(projectPath, "CMakeLists.txt");
-                if (!File.Exists(cmakePath))
+                // Try to infer from xmake.lua
+                var xmakePath = Path.Combine(projectPath, "xmake.lua");
+                if (!File.Exists(xmakePath))
                 {
                     return Result<SkseProjectConfig>.Fail(
                         "Not a valid SKSE project directory",
-                        suggestions: new List<string> { "Missing skse-project.json and CMakeLists.txt" });
+                        suggestions: new List<string> { "Missing skse-project.json and xmake.lua" });
                 }
 
-                var config = InferConfigFromCMake(cmakePath);
+                var config = InferConfigFromXmake(xmakePath);
                 if (config != null)
                 {
                     return Result<SkseProjectConfig>.Ok(config);
@@ -152,7 +152,7 @@ public class SkseProjectService
 
                 return Result<SkseProjectConfig>.Fail(
                     "Could not read project configuration",
-                    suggestions: new List<string> { "Ensure skse-project.json exists or CMakeLists.txt is valid" });
+                    suggestions: new List<string> { "Ensure skse-project.json exists or xmake.lua is valid" });
             }
 
             var json = File.ReadAllText(configPath);
@@ -250,7 +250,7 @@ public class SkseProjectService
     }
 
     /// <summary>
-    /// Builds an SKSE plugin project using CMake.
+    /// Builds an SKSE plugin project using xmake.
     /// </summary>
     public async Task<Result<SkseProjectBuildResult>> BuildProjectAsync(
         string projectPath, string configuration = "Release", bool clean = false)
@@ -258,67 +258,71 @@ public class SkseProjectService
         try
         {
             // Verify it's an SKSE project
-            var cmakePath = Path.Combine(projectPath, "CMakeLists.txt");
-            if (!File.Exists(cmakePath))
+            var xmakePath = Path.Combine(projectPath, "xmake.lua");
+            if (!File.Exists(xmakePath))
             {
                 return Result<SkseProjectBuildResult>.Fail(
-                    "Not a valid SKSE project directory - CMakeLists.txt not found",
+                    "Not a valid SKSE project directory - xmake.lua not found",
                     suggestions: new List<string> { "Run 'skse create' first to scaffold a project" });
             }
 
-            // Check for CMake
-            var cmakeCheck = await RunProcessAsync("cmake", "--version", projectPath);
-            if (cmakeCheck.exitCode != 0)
+            // Check for xmake
+            var xmakeCheck = await RunProcessAsync("xmake", "--version", projectPath);
+            if (xmakeCheck.exitCode != 0)
             {
                 return Result<SkseProjectBuildResult>.Fail(
-                    "CMake not found. CMake 3.24+ is required to build SKSE plugins.",
+                    "xmake not found. xmake 2.8+ is required to build SKSE plugins.",
                     suggestions: new List<string>
                     {
-                        "Install CMake from https://cmake.org/download/",
-                        "Ensure CMake is in your PATH",
+                        "Install xmake from https://xmake.io",
+                        "Ensure xmake is in your PATH",
                         "Run the Setup Wizard to check build tool status"
                     });
             }
 
             // Clean if requested
             var buildDir = Path.Combine(projectPath, "build");
-            if (clean && Directory.Exists(buildDir))
+            var xmakeCacheDir = Path.Combine(projectPath, ".xmake");
+            if (clean)
             {
                 _logger.Info("Cleaning build directory...");
-                Directory.Delete(buildDir, true);
+                if (Directory.Exists(buildDir))      Directory.Delete(buildDir, true);
+                if (Directory.Exists(xmakeCacheDir)) Directory.Delete(xmakeCacheDir, true);
             }
 
-            // Configure with CMake
-            _logger.Info("Configuring with CMake...");
+            // xmake uses lowercase mode names: release / debug.
+            var xmakeMode = configuration.Equals("Debug", StringComparison.OrdinalIgnoreCase) ? "debug" : "release";
+
+            // Configure with xmake (resolves deps from xmake-repo on first run).
+            _logger.Info("Configuring with xmake...");
             var configureResult = await RunProcessAsync(
-                "cmake", $"-B build -S .", projectPath);
+                "xmake", $"config --yes -m {xmakeMode} -p windows -a x64", projectPath);
 
             if (configureResult.exitCode != 0)
             {
                 var suggestions = new List<string>();
-                if (configureResult.output.Contains("No CMAKE_CXX_COMPILER", StringComparison.OrdinalIgnoreCase) ||
-                    configureResult.output.Contains("compiler is not found", StringComparison.OrdinalIgnoreCase))
+                if (configureResult.output.Contains("Visual Studio", StringComparison.OrdinalIgnoreCase) &&
+                    configureResult.output.Contains("not found", StringComparison.OrdinalIgnoreCase))
                 {
                     suggestions.Add("MSVC Build Tools not found - install from https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022");
                     suggestions.Add("Select 'Desktop development with C++' workload during installation");
-                    suggestions.Add("Run from 'x64 Native Tools Command Prompt for VS 2022'");
                 }
                 else
                 {
                     suggestions.Add("Check the error output above for details");
-                    suggestions.Add("Ensure you have internet access (needed for first build to download CommonLibSSE-NG)");
-                    suggestions.Add("Try: skse build --clean to do a fresh build");
+                    suggestions.Add("Ensure you have internet access (first build downloads CommonLibSSE-NG, fmt, spdlog via xmake-repo)");
+                    suggestions.Add("Try: skse build --clean for a fresh configure");
                 }
 
                 return Result<SkseProjectBuildResult>.Fail(
-                    $"CMake configuration failed:\n{configureResult.output}",
+                    $"xmake configuration failed:\n{configureResult.output}",
                     suggestions: suggestions);
             }
 
             // Build
             _logger.Info($"Building ({configuration})...");
             var buildResult = await RunProcessAsync(
-                "cmake", $"--build build --config {configuration}", projectPath);
+                "xmake", "build --yes", projectPath);
 
             if (buildResult.exitCode != 0)
             {
@@ -332,24 +336,19 @@ public class SkseProjectService
                     });
             }
 
-            // Find the output DLL
-            var dllPattern = "*.dll";
-            var outputDir = Path.Combine(buildDir, configuration);
+            // xmake output layout: build/windows/x64/<mode>/<target>.dll
             string? dllPath = null;
-
+            var outputDir = Path.Combine(buildDir, "windows", "x64", xmakeMode);
             if (Directory.Exists(outputDir))
             {
-                var dlls = Directory.GetFiles(outputDir, dllPattern);
-                dllPath = dlls.FirstOrDefault();
+                dllPath = Directory.GetFiles(outputDir, "*.dll").FirstOrDefault();
             }
-
-            // Also check build root (some generators put it there)
+            // Fallback: search anywhere under build/ (in case the layout differs).
             if (dllPath == null && Directory.Exists(buildDir))
             {
-                var dlls = Directory.GetFiles(buildDir, dllPattern, SearchOption.AllDirectories)
+                dllPath = Directory.GetFiles(buildDir, "*.dll", SearchOption.AllDirectories)
                     .Where(f => !f.Contains("CommonLib", StringComparison.OrdinalIgnoreCase))
-                    .ToArray();
-                dllPath = dlls.FirstOrDefault();
+                    .FirstOrDefault();
             }
 
             var result = new SkseProjectBuildResult
@@ -372,27 +371,33 @@ public class SkseProjectService
     }
 
     /// <summary>
-    /// Checks if CMake is installed and returns version info.
+    /// Checks if xmake is installed and returns version info.
     /// </summary>
-    public async Task<Result<string>> CheckCMakeAsync()
+    public async Task<Result<string>> CheckXmakeAsync()
     {
         try
         {
-            var result = await RunProcessAsync("cmake", "--version", null);
+            var result = await RunProcessAsync("xmake", "--version", null);
             if (result.exitCode == 0)
             {
                 var firstLine = result.output.Split('\n').FirstOrDefault()?.Trim() ?? result.output.Trim();
                 return Result<string>.Ok(firstLine);
             }
-            return Result<string>.Fail("CMake not found",
-                suggestions: new List<string> { "Install from https://cmake.org/download/" });
+            return Result<string>.Fail("xmake not found",
+                suggestions: new List<string> { "Install from https://xmake.io" });
         }
         catch
         {
-            return Result<string>.Fail("CMake not found",
-                suggestions: new List<string> { "Install from https://cmake.org/download/" });
+            return Result<string>.Fail("xmake not found",
+                suggestions: new List<string> { "Install from https://xmake.io" });
         }
     }
+
+    /// <summary>
+    /// Backwards-compat shim - returns the xmake check result.
+    /// </summary>
+    [Obsolete("Use CheckXmakeAsync. CMake is no longer the build driver.")]
+    public Task<Result<string>> CheckCMakeAsync() => CheckXmakeAsync();
 
     /// <summary>
     /// Checks if MSVC Build Tools are installed.
@@ -473,19 +478,30 @@ public class SkseProjectService
         };
     }
 
-    private SkseProjectConfig? InferConfigFromCMake(string cmakePath)
+    private SkseProjectConfig? InferConfigFromXmake(string xmakePath)
     {
         try
         {
-            var content = File.ReadAllText(cmakePath);
+            var content = File.ReadAllText(xmakePath);
             var config = new SkseProjectConfig();
 
-            // Try to extract project name
+            // Extract project name from set_project("Foo") or target("Foo")
             var projectMatch = System.Text.RegularExpressions.Regex.Match(
-                content, @"project\s*\(\s*(\w+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                content, @"set_project\s*\(\s*[""']([^""']+)[""']\s*\)",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (projectMatch.Success)
             {
                 config.Name = projectMatch.Groups[1].Value;
+            }
+            else
+            {
+                var targetMatch = System.Text.RegularExpressions.Regex.Match(
+                    content, @"target\s*\(\s*[""']([^""']+)[""']\s*\)",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (targetMatch.Success)
+                {
+                    config.Name = targetMatch.Groups[1].Value;
+                }
             }
 
             // Check if it has papyrus support
