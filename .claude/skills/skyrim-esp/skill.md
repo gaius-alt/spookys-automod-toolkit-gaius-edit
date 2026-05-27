@@ -182,6 +182,19 @@ dotnet run --project src/SpookysAutomod.Cli -- esp add-outfit "<plugin>" "<edito
 ```
 Presets: `guard` (iron armor + sword + shield), `farmer` (clothes), `mage` (robes + hood), `thief` (leather armor)
 
+**Place a REFR (PlacedObject) in a cell:**
+```bash
+dotnet run --project src/SpookysAutomod.Cli -- esp add-refr "<plugin>" \
+    --base "<FormKey>"   `# e.g. 000033:Skyrim.esm for XMarker, 00003B:Skyrim.esm for XMarkerHeading` \
+    --cell "<FormKey>"   `# any cell in the plugin or a master` \
+    --x 0 --y 0 --z 0    `# world or cell-local coords` \
+    --editor-id "MyMarker_01" \
+    --data-folder "<path-to-Data>"  `# required if cell is in a master`
+```
+- Persistent by default (survives save/load, can be `MoveTo`'d at runtime). Add `--temporary` for cell.Temporary placement instead.
+- If the cell is in a master, the toolkit overrides it into the target plugin and adds the REFR to its `Persistent` (or `Temporary`) collection. Multiple add-refr calls into the same master cell reuse the same override.
+- For dynamic-destination travel-package proxies, place XMarkers via this command and target them from `add-package --type travel --destination <xmarker FormKey>`. The DLL MoveTos the XMarker at runtime to redirect the package's target.
+
 ### Record Management
 
 **List Records:**

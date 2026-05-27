@@ -62,6 +62,7 @@ public static class EspCommands
         espCommand.AddCommand(CreateAddRefrCommand());
         espCommand.AddCommand(CreateRemoveRecordCommand());
         espCommand.AddCommand(CreateCloneRecordCommand());
+        espCommand.AddCommand(CreateScriptCommand());
 
         return espCommand;
     }
@@ -3352,42 +3353,68 @@ public static class EspCommands
 
     private static Command CreateAddConditionCommand()
     {
-        var sourceArg = new Argument<string>("source", "Path to the source plugin");
-        var outputOption = new Option<string>(
-            aliases: new[] { "--output", "-o" },
-            description: "Name of the output patch plugin");
+        // M7.12a: generalized in-place CTDA writer. Modifies the source
+        // plugin directly (no patch ESP) and supports any record type
+        // whose Mutagen class exposes a writable Conditions list
+        // (Perk, Package, etc.). Plumbs comparison value + operator +
+        // first-parameter FormKey through to the service so functions
+        // like GetFactionRank(<faction>) == <rank> are reachable.
+        var pluginArg = new Argument<string>("plugin", "Path to the plugin to modify in-place");
         var editorIdOption = new Option<string?>("--editor-id", "EditorID of the record");
         var formIdOption = new Option<string?>("--form-id", "FormID of the record");
-        var typeOption = new Option<string?>("--type", "Record type (required with --editor-id)");
+        var typeOption = new Option<string?>("--type", "Record type (required with --editor-id; e.g. perk, package)");
         var functionOption = new Option<string>(
             "--function",
-            description: "Condition function (e.g., GetLevel, IsSneaking)");
+            description: "Condition function name (e.g. GetLevel, IsSneaking, GetFactionRank)");
         var valueOption = new Option<float>(
             "--value",
             getDefaultValue: () => 1.0f,
-            description: "Comparison value (default: 1.0, uses >= operator)");
+            description: "Comparison value (default 1.0)");
+        var operatorOption = new Option<string>(
+            "--operator",
+            getDefaultValue: () => "GreaterThanOrEqualTo",
+            description: "Comparison operator (EqualTo, NotEqualTo, GreaterThan, GreaterThanOrEqualTo, LessThan, LessThanOrEqualTo)");
+        var param1Option = new Option<string?>(
+            "--param1",
+            description: "Optional FormKey for the function's first reference parameter (e.g. Faction for GetFactionRank). Format: 'FORMID:Plugin.esp'");
 
-        outputOption.IsRequired = true;
         functionOption.IsRequired = true;
 
-        var cmd = new Command("add-condition", "Add a condition to a record (uses >= 1.0 comparison)")
+        var cmd = new Command("add-condition", "Add a CTDA condition to a record (Perk, Package, etc.) in-place")
         {
-            sourceArg,
-            outputOption,
+            pluginArg,
             editorIdOption,
             formIdOption,
             typeOption,
-            functionOption
+            functionOption,
+            valueOption,
+            operatorOption,
+            param1Option
         };
 
-        cmd.SetHandler((source, output, editorId, formId, type, function, json, verbose) =>
+        // Use InvocationContext to read parsed values - System.CommandLine
+        // SetHandler maxes at 8 typed args, the context-pull pattern is
+        // unlimited.
+        cmd.SetHandler(context =>
         {
+            var parse = context.ParseResult;
+            var plugin = parse.GetValueForArgument(pluginArg);
+            var editorId = parse.GetValueForOption(editorIdOption);
+            var formId = parse.GetValueForOption(formIdOption);
+            var type = parse.GetValueForOption(typeOption);
+            var function = parse.GetValueForOption(functionOption);
+            var value = parse.GetValueForOption(valueOption);
+            var op = parse.GetValueForOption(operatorOption);
+            var param1 = parse.GetValueForOption(param1Option);
+            var json = parse.GetValueForOption(_jsonOption);
+            var verbose = parse.GetValueForOption(_verboseOption);
+
             var logger = CreateLogger(json, verbose);
             var service = new PluginService(logger);
 
-            // Note: Value hardcoded to 1.0f to stay within 8-parameter SetHandler limit
-            // Most conditions use 1.0 for true/false checks
-            var result = service.AddCondition(source, editorId, formId, type, function, 1.0f, "GreaterThanOrEqualTo", output, null);
+            var result = service.AddCondition(
+                plugin, editorId, formId, type,
+                function!, value, op!, param1, null);
 
             if (json)
             {
@@ -3395,8 +3422,7 @@ public static class EspCommands
             }
             else if (result.Success)
             {
-                Console.WriteLine($"Created patch with new {function} condition:");
-                Console.WriteLine(result.Value);
+                Console.WriteLine($"Added {function} condition to {result.Value}");
             }
             else
             {
@@ -3411,8 +3437,7 @@ public static class EspCommands
                 }
                 Environment.ExitCode = 1;
             }
-        }, sourceArg, outputOption, editorIdOption, formIdOption, typeOption,
-           functionOption, _jsonOption, _verboseOption);
+        });
 
         return cmd;
     }
@@ -4074,6 +4099,184 @@ public static class EspCommands
                     }
                 }
                 Environment.ExitCode = 1;
+            }
+        });
+
+        return cmd;
+    }
+
+    // ========================================================================
+    // esp script <ops.json>
+    //
+    // Runs a list of mutation ops against a single in-memory mod, saving once
+    // at the end. Replaces N invocations of individual `esp add-*` commands
+    // with one invocation that opens + saves the ESP a single time. Driven by
+    // EspBatchService - which ops are supported is defined there.
+    //
+    // Ops JSON shape:
+    //   {
+    //     "plugin": "G:\\path\\to\\Plugin.esp",
+    //     "ops": [
+    //       { "id": "x1", "op": "add-refr",      "args": { ... } },
+    //       {             "op": "add-package",   "args": { ... } },
+    //       ...
+    //     ]
+    //   }
+    //
+    // Path "-" reads from stdin instead of a file (useful for piping from a
+    // build script without a temp file).
+    // ========================================================================
+    private static Command CreateScriptCommand()
+    {
+        var opsFileArg = new Argument<string>(
+            "ops-file",
+            "Path to a JSON ops file ({ plugin, ops:[...] }). Use '-' to read JSON from stdin.");
+
+        var cmd = new Command(
+            "script",
+            "Apply many ESP mutations from a JSON ops file against a single in-memory mod (one load, one save).")
+        {
+            opsFileArg
+        };
+
+        cmd.SetHandler((context) =>
+        {
+            var opsFile = context.ParseResult.GetValueForArgument(opsFileArg);
+            var json = context.ParseResult.GetValueForOption(_jsonOption);
+            var verbose = context.ParseResult.GetValueForOption(_verboseOption);
+
+            var logger = CreateLogger(json, verbose);
+
+            string opsText;
+            try
+            {
+                opsText = opsFile == "-"
+                    ? Console.In.ReadToEnd()
+                    : File.ReadAllText(opsFile);
+            }
+            catch (Exception ex)
+            {
+                OutputError($"Failed to read ops file '{opsFile}': {ex.Message}", json);
+                return;
+            }
+
+            JsonDocument doc;
+            try
+            {
+                doc = JsonDocument.Parse(opsText);
+            }
+            catch (Exception ex)
+            {
+                OutputError($"Ops file is not valid JSON: {ex.Message}", json);
+                return;
+            }
+
+            string? pluginPath;
+            List<BatchOpEntry> ops;
+            try
+            {
+                pluginPath = doc.RootElement.GetProperty("plugin").GetString();
+                if (string.IsNullOrEmpty(pluginPath))
+                {
+                    OutputError("Ops file missing required 'plugin' field", json);
+                    return;
+                }
+
+                var opsArr = doc.RootElement.GetProperty("ops");
+                if (opsArr.ValueKind != JsonValueKind.Array)
+                {
+                    OutputError("Ops file 'ops' must be an array", json);
+                    return;
+                }
+
+                ops = new List<BatchOpEntry>();
+                foreach (var el in opsArr.EnumerateArray())
+                {
+                    ops.Add(new BatchOpEntry
+                    {
+                        Id = el.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String ? idEl.GetString() : null,
+                        Op = el.GetProperty("op").GetString() ?? "",
+                        // Clone the args subtree so it survives the JsonDocument scope.
+                        // Cheap (small objects) and avoids lifetime bugs if the doc is
+                        // disposed before ops execute.
+                        Args = el.TryGetProperty("args", out var argsEl)
+                            ? JsonDocument.Parse(argsEl.GetRawText()).RootElement
+                            : JsonDocument.Parse("{}").RootElement
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                OutputError($"Failed to parse ops: {ex.Message}", json);
+                return;
+            }
+
+            var pluginService = new PluginService(logger);
+            var loadResult = pluginService.LoadPluginForEdit(pluginPath);
+            if (!loadResult.Success)
+            {
+                OutputError(loadResult.Error!, json);
+                return;
+            }
+            var mod = loadResult.Value!;
+
+            var batchService = new EspBatchService(logger, pluginService);
+            var runResult = batchService.ExecuteOps(mod, ops);
+
+            // Only save if every op succeeded. A partial save would leave the
+            // ESP in an inconsistent state that the next build run would have
+            // to clean up; bailing keeps the on-disk plugin matching the last
+            // known-good state.
+            string? saveError = null;
+            if (runResult.Success)
+            {
+                var saveResult = pluginService.SavePlugin(mod, pluginPath);
+                if (!saveResult.Success)
+                {
+                    saveError = saveResult.Error;
+                }
+            }
+
+            if (json)
+            {
+                Console.WriteLine(new
+                {
+                    success = runResult.Success && saveError == null,
+                    opCount = runResult.OpCount,
+                    succeeded = runResult.Succeeded,
+                    failed = runResult.Failed,
+                    failedAt = runResult.FailedAt,
+                    saveError,
+                    results = runResult.Results.Select(r => new
+                    {
+                        index = r.Index,
+                        id = r.Id,
+                        op = r.Op,
+                        success = r.Success,
+                        value = r.Value,
+                        error = r.Error
+                    })
+                }.ToJson());
+                if (!runResult.Success || saveError != null) Environment.ExitCode = 1;
+            }
+            else
+            {
+                Console.WriteLine($"Script: {runResult.Succeeded}/{runResult.OpCount} ops succeeded.");
+                if (!runResult.Success)
+                {
+                    var failed = runResult.Results.LastOrDefault();
+                    Console.Error.WriteLine($"Failed at op #{runResult.FailedAt} ({failed?.Op}): {failed?.Error}");
+                    Environment.ExitCode = 1;
+                }
+                else if (saveError != null)
+                {
+                    Console.Error.WriteLine($"All ops succeeded but save failed: {saveError}");
+                    Environment.ExitCode = 1;
+                }
+                else
+                {
+                    Console.WriteLine($"Saved {pluginPath}.");
+                }
             }
         });
 

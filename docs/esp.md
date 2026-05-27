@@ -1519,6 +1519,106 @@ MyMod_Patch.esp
 
 ---
 
+### script
+
+Apply many ESP mutations from a JSON ops file against a single in-memory mod. Opens the plugin once, applies all listed ops sequentially, saves once at the end. Use this instead of looping individual `esp add-*` commands when generating many records - each per-command call is a separate process + full plugin parse/serialize round trip, so the per-call cost dominates in any loop of ~5+ ops.
+
+```bash
+esp script <ops-file>
+```
+
+**Arguments:**
+| Argument | Description |
+|----------|-------------|
+| `ops-file` | Path to a JSON ops file, or `-` to read JSON from stdin |
+
+**Ops file shape:**
+
+```json
+{
+  "plugin": "path/to/MyMod.esp",
+  "ops": [
+    {
+      "id": "xmarker_01",
+      "op": "add-refr",
+      "args": { "base": "00003B:Skyrim.esm", "cell": "1037E7:Skyrim.esm", "editorId": "MyXMarker_01", "x": 0, "y": 0, "z": 0, "dataFolder": "C:\\Skyrim\\Data" }
+    },
+    {
+      "op": "add-package",
+      "args": { "editorId": "MyTravelPkg_01", "type": "travel", "destination": "000801:MyMod.esp" }
+    }
+  ]
+}
+```
+
+**Supported ops** (defined in `EspBatchService.DispatchOne`; extend by adding a case there):
+
+| op | args |
+|----|------|
+| `add-refr` | `base`, `cell`, `editorId`, `x`, `y`, `z`, optional `rotX`/`rotY`/`rotZ`/`persistent`/`dataFolder` |
+| `add-package` | `editorId`, `type` (one of: `sandbox`, `travel`, `follow`), plus type-specific args |
+| `add-condition` | `editorId` (or `formId`) + `type`, `function`, `value`, `operator`, optional `param1` |
+| `attach-package` | `quest`, `alias`, `package` |
+| `add-alias` | `quest`, `name`, optional `flags`, optional `script` |
+| `attach-alias-script` | `quest`, `alias`, `script` |
+
+Package-type-specific args for `add-package`:
+- `sandbox`: `radius` (uint, default 1024)
+- `travel`: `destination` (FormKey of a REFR)
+- `follow`: `targetAliasQuest`, `targetAliasName`, optional `minRadius` (128), `maxRadius` (256), `goToLeadersGoal` (true), `needLos` (false), `rideHorse` (false)
+
+**Behavior:**
+
+- Ops run sequentially against a single in-memory `SkyrimMod`. Later ops see the state mutated by earlier ones (e.g. an `attach-package` op can reference a package created earlier in the same batch by editor ID).
+- On any op failure, the dispatcher aborts and **the plugin is NOT saved** - the on-disk ESP stays at its pre-batch state so the next run isn't building on a half-applied mutation.
+- The optional `id` field is returned in the per-op result for the caller to identify by name. Typical use: extract a newly-created REFR's FormKey to substitute into a subsequent batch.
+- No back-reference substitution inside the batch (no `${id}` syntax). If a later op needs a FormKey from an earlier op, use two batches with the caller pulling op A's result and substituting before assembling batch B.
+
+**Output (JSON mode):**
+
+```json
+{
+  "success": true,
+  "opCount": 150,
+  "succeeded": 150,
+  "failed": 0,
+  "failedAt": null,
+  "saveError": null,
+  "results": [
+    { "index": 0, "id": "xmarker_01", "op": "add-refr", "success": true, "value": "000801:MyMod.esp", "error": null }
+  ]
+}
+```
+
+On failure, `success` is false, `failedAt` is the 0-based index of the failed op, the failing op's `error` describes what broke, and any ops after the failure are absent from `results`.
+
+**Examples:**
+
+```bash
+# Apply a batch from a file
+esp script ops.json --json
+
+# Pipe a batch via stdin
+cat ops.json | esp script - --json
+
+# PowerShell: build ops list, emit JSON, run
+$ops = @(
+    @{ id = "x1"; op = "add-refr"; args = @{ base = "00003B:Skyrim.esm"; cell = "1037E7:Skyrim.esm"; editorId = "X1"; x = 0; y = 0; z = 0; dataFolder = "C:\Skyrim\Data" } },
+    @{ op = "add-package"; args = @{ editorId = "P1"; type = "sandbox"; radius = 1024 } }
+)
+@{ plugin = "MyMod.esp"; ops = $ops } | ConvertTo-Json -Depth 10 -Compress | Out-File ops.json -Encoding UTF8
+spookys-automod esp script ops.json --json
+```
+
+**When to use vs individual `esp add-*` commands:**
+
+- Use `esp script` for bulk generation (rough threshold: 5+ ops on the same plugin), build pipelines, or anything inside a script loop.
+- Use the individual commands for one-off mutations, interactive exploration, or when you need an op that batch mode doesn't support yet.
+
+**Reference consumer:** `mods/_GaiusMissions/Build-_GaiusMissions.ps1` (in the modlist this toolkit ships in) - two batches replace what was ~750 individual toolkit calls for a 50-slot unified alias pool.
+
+---
+
 ## Workflow Examples
 
 ### Creating an Override Patch

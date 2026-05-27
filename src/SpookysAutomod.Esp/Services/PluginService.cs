@@ -1435,7 +1435,7 @@ public class PluginService
     /// <summary>
     /// Find a record by FormKey string
     /// </summary>
-    private Result<IMajorRecordGetter> FindRecordByFormKey(ISkyrimModGetter mod, string formKeyStr)
+    internal Result<IMajorRecordGetter> FindRecordByFormKey(ISkyrimModGetter mod, string formKeyStr)
     {
         try
         {
@@ -1475,7 +1475,7 @@ public class PluginService
     /// <summary>
     /// Find a record by EditorID and type
     /// </summary>
-    private Result<IMajorRecordGetter> FindRecordByEditorId(ISkyrimModGetter mod, string editorId, string recordType)
+    internal Result<IMajorRecordGetter> FindRecordByEditorId(ISkyrimModGetter mod, string editorId, string recordType)
     {
         try
         {
@@ -1500,6 +1500,9 @@ public class PluginService
                     break;
                 case "perk":
                     found = mod.Perks.FirstOrDefault(p => p.EditorID?.Equals(editorId, StringComparison.OrdinalIgnoreCase) == true);
+                    break;
+                case "package":
+                    found = mod.Packages.FirstOrDefault(p => p.EditorID?.Equals(editorId, StringComparison.OrdinalIgnoreCase) == true);
                     break;
                 case "faction":
                     found = mod.Factions.FirstOrDefault(f => f.EditorID?.Equals(editorId, StringComparison.OrdinalIgnoreCase) == true);
@@ -2776,81 +2779,76 @@ public class PluginService
     /// <summary>
     /// Add a condition to a record
     /// </summary>
+    /// <summary>
+    /// Add a CTDA condition to a record's Conditions list. Modifies the
+    /// source plugin in-place (no patch ESP). Supports any record type
+    /// whose Mutagen class exposes a writable `Conditions` IList&lt;Condition&gt;
+    /// (Perk, Package, and others - resolved dynamically via reflection).
+    ///
+    /// `parameter1FormKey` is the optional reference target for condition
+    /// functions whose ConditionData has a FormLink property (e.g.
+    /// GetFactionRank's Faction parameter, GetIsID's Object parameter).
+    /// The first FormLink property on the ConditionData receives this
+    /// value; pass null to leave it at the type default (FormID 0).
+    /// </summary>
     public Result<string> AddCondition(
-        string sourcePluginPath,
+        string pluginPath,
         string? editorId,
         string? formId,
         string? recordType,
         string conditionFunction,
         float comparisonValue,
         string comparisonOperator,
-        string outputPluginName,
+        string? parameter1FormKey = null,
         string? dataFolder = null)
     {
         try
         {
-            if (!File.Exists(sourcePluginPath))
+            if (!File.Exists(pluginPath))
             {
-                return Result<string>.Fail($"Source plugin not found: {sourcePluginPath}");
+                return Result<string>.Fail($"Plugin not found: {pluginPath}");
             }
 
-            var sourceMod = SkyrimMod.CreateFromBinaryOverlay(sourcePluginPath, SkyrimRelease.SkyrimSE);
+            var mod = SkyrimMod.CreateFromBinary(
+                pluginPath,
+                SkyrimRelease.SkyrimSE,
+                new Mutagen.Bethesda.Plugins.Binary.Parameters.BinaryReadParameters());
 
-            IMajorRecordGetter? sourceRecord = null;
+            // Locate the record we're attaching the condition to. The
+            // CreateFromBinary load returns the writable mod, so the
+            // returned IMajorRecordGetter is actually the writable
+            // instance via Mutagen's interface dispatch.
+            IMajorRecord? targetRecord = null;
 
             if (!string.IsNullOrEmpty(formId))
             {
-                var findResult = FindRecordByFormKey(sourceMod, formId);
+                var findResult = FindRecordByFormKey(mod, formId);
                 if (!findResult.Success || findResult.Value == null)
                 {
                     return Result<string>.Fail("Record not found");
                 }
-                sourceRecord = findResult.Value;
+                targetRecord = findResult.Value as IMajorRecord;
             }
             else if (!string.IsNullOrEmpty(editorId) && !string.IsNullOrEmpty(recordType))
             {
-                var findResult = FindRecordByEditorId(sourceMod, editorId, recordType);
+                var findResult = FindRecordByEditorId(mod, editorId, recordType);
                 if (!findResult.Success || findResult.Value == null)
                 {
                     return Result<string>.Fail("Record not found");
                 }
-                sourceRecord = findResult.Value;
+                targetRecord = findResult.Value as IMajorRecord;
             }
             else
             {
                 return Result<string>.Fail("Must provide either FormID or both EditorID and RecordType");
             }
 
-            if (!outputPluginName.EndsWith(".esp", StringComparison.OrdinalIgnoreCase) &&
-                !outputPluginName.EndsWith(".esl", StringComparison.OrdinalIgnoreCase))
+            if (targetRecord == null)
             {
-                outputPluginName += ".esp";
+                return Result<string>.Fail("Record located but is not writable");
             }
 
-            var outputModKey = ModKey.FromFileName(outputPluginName);
-            var patchMod = new SkyrimMod(outputModKey, SkyrimRelease.SkyrimSE);
-
-            patchMod.ModHeader.MasterReferences.Add(new MasterReference
-            {
-                Master = sourceMod.ModKey
-            });
-
-            // Only Perks are currently supported
-            if (sourceRecord is not IPerkGetter)
-            {
-                return Result<string>.Fail(
-                    "Condition manipulation currently only supported for Perk records",
-                    suggestions: new List<string>
-                    {
-                        "Use --type perk",
-                        "Other record types coming soon"
-                    });
-            }
-
-            var perkSource = (IPerkGetter)sourceRecord;
-            var perkOverride = (Perk)perkSource.DeepCopy();
-
-            // Parse comparison operator
+            // Parse comparison operator.
             if (!Enum.TryParse<CompareOperator>(comparisonOperator, true, out var compareOp))
             {
                 return Result<string>.Fail(
@@ -2861,26 +2859,66 @@ public class PluginService
                     });
             }
 
-            // Create condition based on function name
-            var conditionResult = CreateConditionFromFunction(conditionFunction, comparisonValue, compareOp);
+            // Parse parameter1 FormKey if provided.
+            FormKey? param1 = null;
+            if (!string.IsNullOrEmpty(parameter1FormKey))
+            {
+                if (!FormKey.TryFactory(parameter1FormKey, out var parsed))
+                {
+                    return Result<string>.Fail(
+                        $"Invalid parameter1 FormKey: {parameter1FormKey}",
+                        suggestions: new List<string>
+                        {
+                            "FormKey format: 'FORMID:Plugin.esp' (e.g. '000800:MyMod.esp')"
+                        });
+                }
+                param1 = parsed;
+            }
+
+            // Build the Condition.
+            var conditionResult = CreateConditionFromFunction(
+                conditionFunction, comparisonValue, compareOp, param1);
             if (!conditionResult.Success || conditionResult.Value == null)
             {
                 return Result<string>.Fail(conditionResult.Error ?? "Failed to create condition");
             }
 
-            perkOverride.Conditions.Add(conditionResult.Value);
+            // Locate the record's writable Conditions list via reflection.
+            // Any Mutagen record exposing `IList<Condition> Conditions` is
+            // supported - we don't enumerate record types statically. If a
+            // record has no Conditions property the dispatch fails cleanly.
+            var conditionsProp = targetRecord.GetType().GetProperty("Conditions");
+            if (conditionsProp == null)
+            {
+                return Result<string>.Fail(
+                    $"Record type '{targetRecord.GetType().Name}' has no Conditions property",
+                    suggestions: new List<string>
+                    {
+                        "Verify the record type supports conditions (Perk, Package, etc.)",
+                        "Use 'esp list-conditions' to confirm the record exposes Conditions"
+                    });
+            }
+            var conditionsList = conditionsProp.GetValue(targetRecord)
+                as System.Collections.IList;
+            if (conditionsList == null)
+            {
+                return Result<string>.Fail(
+                    $"Record type '{targetRecord.GetType().Name}' Conditions property is not a writable list");
+            }
+            conditionsList.Add(conditionResult.Value);
 
-            patchMod.Perks.Add(perkOverride);
-
+            // Write the (modified) source mod back in-place.
             var outputDir = !string.IsNullOrEmpty(dataFolder)
                 ? dataFolder
-                : Path.GetDirectoryName(sourcePluginPath) ?? Directory.GetCurrentDirectory();
+                : Path.GetDirectoryName(pluginPath) ?? Directory.GetCurrentDirectory();
+            var outputPath = Path.Combine(outputDir, Path.GetFileName(pluginPath));
 
-            var outputPath = Path.Combine(outputDir, outputPluginName);
+            mod.WriteToBinary(outputPath);
 
-            patchMod.WriteToBinary(outputPath);
-
-            _logger.Info($"Created patch with new condition: {outputPath}");
+            _logger.Info(
+                $"Added {conditionFunction} condition (operator={compareOp}, " +
+                $"value={comparisonValue}, param1={parameter1FormKey ?? "<none>"}) " +
+                $"to {targetRecord.GetType().Name} '{targetRecord.EditorID}'");
             return Result<string>.Ok(outputPath);
         }
         catch (Exception ex)
@@ -2890,21 +2928,28 @@ public class PluginService
     }
 
     /// <summary>
-    /// Create a condition from a function name
-    /// Uses reflection to create ConditionData types dynamically
+    /// Create a condition from a function name. Uses reflection to
+    /// resolve the ConditionData subclass (e.g. GetFactionRankConditionData)
+    /// from the function name + Mutagen assembly.
+    ///
+    /// `parameter1FormKey` (optional) populates the first FormLink-typed
+    /// property on the ConditionData (e.g. Faction for GetFactionRank).
+    /// This avoids per-function-name special casing - any condition
+    /// function whose data type has a single FormLink reference works
+    /// generically.
     /// </summary>
-    private Result<Condition> CreateConditionFromFunction(
+    internal Result<Condition> CreateConditionFromFunction(
         string functionName,
         float comparisonValue,
-        CompareOperator compareOperator)
+        CompareOperator compareOperator,
+        FormKey? parameter1FormKey = null)
     {
         try
         {
-            // Build the ConditionData type name
+            // Build the ConditionData type name.
             var typeName = $"{functionName}ConditionData";
             var fullTypeName = $"Mutagen.Bethesda.Skyrim.{typeName}";
 
-            // Try to find the type in the Mutagen assembly
             var conditionDataType = typeof(ISkyrimMod).Assembly.GetType(fullTypeName);
             if (conditionDataType == null)
             {
@@ -2912,20 +2957,105 @@ public class PluginService
                     $"Unknown condition function: {functionName}",
                     suggestions: new List<string>
                     {
-                        "Use exact Mutagen function names (e.g., GetLevel, GetActorValue)",
-                        "Supported simple functions: GetLevel",
+                        "Use exact Mutagen function names (e.g., GetLevel, GetActorValue, GetFactionRank)",
+                        "Type name is built as '<Function>ConditionData'",
                         "See Mutagen documentation for full list of condition functions"
                     });
             }
 
-            // Create instance of ConditionData
             var conditionData = System.Activator.CreateInstance(conditionDataType) as ConditionData;
             if (conditionData == null)
             {
                 return Result<Condition>.Fail($"Failed to create instance of {typeName}");
             }
 
-            // Create ConditionFloat with the data
+            // If parameter1FormKey was provided, set the first FormLink-
+            // shaped property on the ConditionData.
+            //
+            // Mutagen's writable ConditionData subclasses model record-
+            // reference parameters as one of several generic interface
+            // shapes:
+            //   - `IFormLink<TGetter>`           - direct FormKey reference
+            //   - `IFormLinkOrIndex<TGetter>`    - FormKey OR alias index
+            //   - `IFormLinkGetter<TGetter>`     - readonly view
+            //
+            // The matching concrete impl name varies (FormLink<T>,
+            // FormLinkOrIndex<T>, ...). Rather than hard-coding pairs we
+            // discover the concrete impl at runtime: walk loaded Mutagen
+            // assemblies, find a non-abstract generic type whose closed
+            // form is assignment-compatible with the property type AND
+            // has a constructor taking FormKey. This auto-handles every
+            // shape Mutagen exposes without per-function special cases.
+            if (parameter1FormKey.HasValue)
+            {
+                var formLinkProp = conditionDataType.GetProperties()
+                    .FirstOrDefault(p =>
+                        p.PropertyType.Name.Contains("FormLink", StringComparison.Ordinal) &&
+                        p.CanWrite);
+                if (formLinkProp == null)
+                {
+                    return Result<Condition>.Fail(
+                        $"{typeName} has no FormLink property to apply parameter1 to",
+                        suggestions: new List<string>
+                        {
+                            "Function does not take a record reference - omit --param1",
+                            "If the function does accept a record reference but isn't picking up, file an issue with the data type name"
+                        });
+                }
+                if (!formLinkProp.PropertyType.IsGenericType)
+                {
+                    return Result<Condition>.Fail(
+                        $"{typeName}.{formLinkProp.Name} is not generic; cannot construct a typed FormLink");
+                }
+
+                var propType = formLinkProp.PropertyType;
+                var genericArg = propType.GetGenericArguments()[0];
+
+                // First try the obvious pair: IFormLink<T> -> FormLink<T>.
+                object? formLinkValue = TryConstructFormLinkOf(
+                    typeof(FormLink<>), genericArg, parameter1FormKey.Value, propType);
+
+                // If FormLink<T> isn't assignment-compatible, discover
+                // the right concrete impl via reflection across all
+                // loaded assemblies (Mutagen splits types across
+                // Mutagen.Bethesda.Plugins, .Skyrim, .Core, etc).
+                if (formLinkValue == null)
+                {
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        Type[] types;
+                        try { types = asm.GetTypes(); }
+                        catch (ReflectionTypeLoadException ex)
+                        {
+                            types = ex.Types.Where(t => t != null).Cast<Type>().ToArray();
+                        }
+                        foreach (var candidate in types)
+                        {
+                            if (!candidate.IsGenericTypeDefinition) continue;
+                            if (candidate.IsAbstract || candidate.IsInterface) continue;
+                            if (candidate.GetGenericArguments().Length != 1) continue;
+                            formLinkValue = TryConstructFormLinkOf(
+                                candidate, genericArg, parameter1FormKey.Value, propType);
+                            if (formLinkValue != null) break;
+                        }
+                        if (formLinkValue != null) break;
+                    }
+                }
+
+                if (formLinkValue == null)
+                {
+                    return Result<Condition>.Fail(
+                        $"Could not find a concrete impl assignable to {propType.FullName} that accepts FormKey",
+                        suggestions: new List<string>
+                        {
+                            "Mutagen likely exposes a non-(FormKey) constructor for this property type",
+                            "Inspect the property type in Mutagen + add a construction pathway in TryConstructFormLinkOf"
+                        });
+                }
+
+                formLinkProp.SetValue(conditionData, formLinkValue);
+            }
+
             var condition = new ConditionFloat
             {
                 ComparisonValue = comparisonValue,
@@ -2939,6 +3069,142 @@ public class PluginService
         {
             return Result<Condition>.Fail($"Failed to create condition: {ex.Message}", ex.StackTrace);
         }
+    }
+
+    /// <summary>
+    /// Construct a closed generic instance of `genericTypeDef`
+    /// (e.g. typeof(FormLink&lt;&gt;)) bound to `genericArg`, with FormKey
+    /// passed to its constructor. Returns null if the constructed type
+    /// isn't assignment-compatible with `targetPropertyType` or if no
+    /// FormKey-accepting constructor exists.
+    /// </summary>
+    private static object? TryConstructFormLinkOf(
+        Type genericTypeDef, Type genericArg, FormKey formKey, Type targetPropertyType)
+    {
+        try
+        {
+            var closed = genericTypeDef.MakeGenericType(genericArg);
+            if (!targetPropertyType.IsAssignableFrom(closed)) return null;
+
+            // Path 1: single-FormKey constructor (FormLink<T>, FormLinkNullable<T>).
+            var ctor1 = closed.GetConstructor(new[] { typeof(FormKey) });
+            if (ctor1 != null)
+            {
+                return ctor1.Invoke(new object[] { formKey });
+            }
+            // Path 2: constructor accepting FormLink<T> (wrapper types).
+            var formLinkClosed = typeof(FormLink<>).MakeGenericType(genericArg);
+            var ctorFL = closed.GetConstructor(new[] { formLinkClosed });
+            if (ctorFL != null)
+            {
+                var inner = System.Activator.CreateInstance(formLinkClosed, formKey);
+                return ctorFL.Invoke(new[] { inner! });
+            }
+            // Path 3: default ctor + writable property assignable from
+            // a FormLink-shaped value, OR a 2-arg ctor (flag, FormKey).
+            // The (flag, FormKey) form is what FormLinkOrIndex<T> exposes
+            // - its `()` ctor exists but is internal so reflection can't
+            // call it with default BindingFlags.
+            var defaultCtor = closed.GetConstructor(Type.EmptyTypes);
+            if (defaultCtor != null)
+            {
+                var instance = defaultCtor.Invoke(null);
+                foreach (var p in closed.GetProperties())
+                {
+                    if (!p.CanWrite) continue;
+                    var built = BuildFormLinkAssignableTo(p.PropertyType, genericArg, formKey);
+                    if (built != null)
+                    {
+                        p.SetValue(instance, built);
+                        return instance;
+                    }
+                    if (p.PropertyType == typeof(FormKey))
+                    {
+                        p.SetValue(instance, formKey);
+                        return instance;
+                    }
+                }
+            }
+            // Path 4: 2-param ctor where the 2nd is FormKey. Used for
+            // FormLinkOrIndex<T>(IFormLinkOrIndexFlagGetter, FormKey).
+            // The flag arg is the owning record's context (e.g. condition
+            // data carries this in the parent record). For our purposes
+            // (writing a fresh CTDA), passing null is acceptable - the
+            // serializer writes the FormKey regardless of flag state.
+            foreach (var ctor2 in closed.GetConstructors())
+            {
+                var ps = ctor2.GetParameters();
+                if (ps.Length != 2) continue;
+                if (ps[1].ParameterType != typeof(FormKey)) continue;
+                if (ps[0].ParameterType.IsValueType) continue;  // flag must be ref/interface
+                try
+                {
+                    return ctor2.Invoke(new object?[] { null, formKey });
+                }
+                catch { /* try next ctor */ }
+            }
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Build a FormLink-shaped instance assignment-compatible with
+    /// `targetType` (typically a Mutagen interface like IFormLink&lt;T&gt;
+    /// or IFormLinkNullable&lt;T&gt;), wrapping `formKey`. Returns null if
+    /// no candidate Mutagen wrapper produces an assignable value.
+    /// </summary>
+    private static object? BuildFormLinkAssignableTo(Type targetType, Type genericArg, FormKey formKey)
+    {
+        // Try the obvious concrete impls first. These cover IFormLink<T>
+        // (closed FormLink<T>) + IFormLinkNullable<T> (closed
+        // FormLinkNullable<T>).
+        Type[] candidates =
+        {
+            typeof(FormLink<>),
+            typeof(FormLinkNullable<>),
+        };
+        foreach (var def in candidates)
+        {
+            try
+            {
+                var closed = def.MakeGenericType(genericArg);
+                if (!targetType.IsAssignableFrom(closed)) continue;
+
+                // Path A: direct (FormKey) constructor.
+                var ctor = closed.GetConstructor(new[] { typeof(FormKey) });
+                if (ctor != null)
+                {
+                    return ctor.Invoke(new object[] { formKey });
+                }
+                // Path B: (Nullable<FormKey>) constructor (FormLinkNullable<T>).
+                var nullableFormKeyType = typeof(System.Nullable<>).MakeGenericType(typeof(FormKey));
+                var ctorNullable = closed.GetConstructor(new[] { nullableFormKeyType });
+                if (ctorNullable != null)
+                {
+                    var nullable = System.Activator.CreateInstance(nullableFormKeyType, formKey);
+                    return ctorNullable.Invoke(new[] { nullable! });
+                }
+                // Path C: default ctor + writable FormKey property.
+                var defaultCtor = closed.GetConstructor(Type.EmptyTypes);
+                if (defaultCtor != null)
+                {
+                    var instance = defaultCtor.Invoke(null);
+                    var formKeyProp = closed.GetProperty("FormKey");
+                    if (formKeyProp != null && formKeyProp.CanWrite &&
+                        formKeyProp.PropertyType == typeof(FormKey))
+                    {
+                        formKeyProp.SetValue(instance, formKey);
+                        return instance;
+                    }
+                }
+            }
+            catch { /* try next */ }
+        }
+        return null;
     }
 
     /// <summary>

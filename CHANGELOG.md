@@ -8,6 +8,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`esp script` command + `EspBatchService`** - Run many ESP mutations against a single in-memory mod (one load, one save) instead of forking a fresh process + re-parsing the plugin per op. Drives `add-refr`, `add-package` (sandbox / travel / follow), `add-condition`, `attach-package`, `add-alias`, `attach-alias-script` from a JSON ops file. Designed for bulk-generation flows (50-slot pools, leveled-list backfills, mass conflict patches) where the per-command CLI's parse/serialize-per-op cost would be brutal. The per-command CLI still works for one-offs; this is additive. No backward-reference substitution in the dispatcher — chain two batches if you need a FormKey produced by op N as input to op M.
+- **`esp add-refr` command** - Place a `PlacedObject` (REFR) into a cell. The cell can be in the target plugin itself or in one of its master files; when overriding a master cell, multiple add-refr calls into the same cell correctly reuse the existing override rather than creating duplicates.
+    - Required: `--base <FormKey>` (the base form to place, e.g. `000033:Skyrim.esm` for `XMarker`), `--cell <FormKey>` (the cell to place into).
+    - Position: `--x`, `--y`, `--z` (defaults to origin). Rotation: `--rot-x`, `--rot-y`, `--rot-z` (radians).
+    - Defaults to persistent (`cell.Persistent` collection); pass `--temporary` for cell.Temporary.
+    - Optional `--editor-id`, `--scale`.
+    - When the cell is in a master, `--data-folder <path-to-Skyrim-Data>` is required so the cell can be resolved + overridden into the target plugin.
+- **New `RefrBuilder` class** in `SpookysAutomod.Esp/Builders/` - fluent builder mirroring `PackageBuilder` pattern. Used by both the CLI command above and any future code that needs to programmatically place REFRs.
+
+### Fixed
+
+- **`PackageBuilder` binary format corrections** (8 bugs surfaced through in-game Phase 3 M2 work; all affected every package the builder could emit, not just Travel):
+    1. `Package.Type` was uninitialized (0); now defaults to `Package.Types.Package` (18). PACK records with type 0 are silently rejected by the engine.
+    2. `BranchType` on `ProcedureTree` branches was the placeholder string `"0"`; now `"Procedure"`. Vanilla uses `"Procedure"` for leaf branches and `"Stacked"` / `"Sequence"` for parents.
+    3. Constructor's default `Flags = OffersServices` (a merchant flag) was wrong for almost every package type. Travel builders now use `MustComplete | IgnoreCombat`; other types still inherit the old default and will need similar audits as they get used (M3 Sandbox / Wander / Guard work to surface those).
+    4. `PackageBuilder.AsTravel` / `AsTravelToAlias` now reference the vanilla `Travel` template (Skyrim.esm:0x00016FAA) via `PackageTemplate`. Vanilla regular-type Type=18 packages get their procedure logic from a template; without one the engine has nowhere to look up "what does this Travel procedure actually do."
+    5. `AsTravel(FormKey)` switched from `PackageDataTarget`/PTDA SingleRef to `PackageDataLocation`/PLDT with FormLink-based `LocationTarget`. Vanilla Travel packages use Location-typed data inputs, not SingleRef targets. The engine fails silently on the wrong subrecord type.
+    6. `AsTravel` now sets schedule fields to "any time" (`ScheduleMonth = -1`, `ScheduleDayOfWeek = -1`, `ScheduleHour = -1`, `ScheduleMinute = -1`). Mutagen defaults zero out all fields which the engine reads as "midnight, 0 duration" - effectively never run.
+    7. `AsTravel` now sets `DataInputVersion = 3` to match the Travel template's declared 3-input count (Location + 2 Bools).
+    8. `AsTravel` now emits the two Bool data inputs the Travel template expects ("Ride Horse if possible?", "Prefer Preferred Path?") at sparse slot indices 0/2/4 (not sequential 0/1/2), matching the template's UNAM-declared slot IDs.
+
+- **`PluginService.AddPackage` CLI option mapping** - the `--destination` CLI option mapped to `options["destinationRef"]` in the dict (the key shared by Accompany packages too), but the travel-case dispatch was checking `options["destination"]`. Now accepts both keys for backward compatibility.
+
+- **`PackageBuilder.AsSandbox` binary format corrections** (parallel set to the Travel fixes - vanilla template-using sandbox packages have a specific binary shape the prior toolkit emission didn't match):
+    1. Now references vanilla `Skyrim.esm:0x0001C254` "Sandbox" template via `PackageTemplate`. Previous emission had no template; the engine had nowhere to look up the Sandbox procedure logic and the package never ran.
+    2. `PSDT` schedule set to all -1s (any time). Previous Mutagen-default all-zeros was read as "midnight, 0 duration" - never run.
+    3. `DataInputVersion = 10` matching the Sandbox template's expected hash. Previous default 0 didn't match.
+    4. 12 data inputs at sparse slot indices (0, 1, 3-7, 14, 25, 27, 29, 31) - matching vanilla `WinterholdKraldarSandboxHome`'s UNAM-declared slot layout. Previously emitted 1 location input only; the template expects all 12 slots filled. Bool values copied verbatim from Kraldar (residential sandbox baseline).
+    5. Slot 29 carries a `PackageDataFloat` (50.0); slots 1/3/.../31 carry `PackageDataBool`. The Sandbox template's procedure treats each slot as a specific behavior toggle (use beds, use chairs, idle markers, etc).
+    6. Constructor's `OffersServices` flag cleared (Kraldar has Flags=0). InterruptFlags set to the 9 documented behavior bits (HellosToPlayer through WorldInteractions) so the NPC reacts to the world while sandboxing - without these, the package runs but the actor looks frozen, no chatter / no reactions. 6 undocumented bits (0xFC00) that Kraldar has are not in Mutagen's enum so skipped; likely Kraldar-specific tuning.
+    7. Default radius bumped from 500 → 1000 (Kraldar's value).
+- **New `PackageDataFloat` usage path** in `AsSandbox` exercises that builder for the first time in the toolkit (only `PackageDataLocation`, `PackageDataTarget`, `PackageDataBool` had been used before).
+
 ## [1.11.2] - 2026-05-20
 
 ### Fixed
