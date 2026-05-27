@@ -4115,7 +4115,7 @@ public static class EspCommands
     //
     // Ops JSON shape:
     //   {
-    //     "plugin": "G:\\path\\to\\Plugin.esp",
+    //     "plugin": "C:\\path\\to\\Plugin.esp",
     //     "ops": [
     //       { "id": "x1", "op": "add-refr",      "args": { ... } },
     //       {             "op": "add-package",   "args": { ... } },
